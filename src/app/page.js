@@ -3,16 +3,23 @@ import StockList from "./StockList";
 
 // 每5分钟重新验证一次缓存（数据每天只更新一次，5分钟足够）
 export const revalidate = 300;
+// 避免 Next 在构建阶段就预渲染页面导致环境变量缺失时报错
+export const dynamic = "force-dynamic";
 
 function getSupabase() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!url || !key) return null;
+
   return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+    url,
+    key
   );
 }
 
 async function getScreenData() {
   const supabase = getSupabase();
+  if (!supabase) return { stocks: [], screenDate: null };
 
   // 第一步：找出数据库里最新的筛选日期
   const { data: dateRow, error: dateErr } = await supabase
@@ -41,6 +48,7 @@ async function getScreenData() {
 
 async function getPerformanceStats() {
   const supabase = getSupabase();
+  if (!supabase) return null;
 
   // 读取所有追踪数据
   const { data, error } = await supabase
@@ -97,6 +105,7 @@ async function getPerformanceStats() {
 // ─────────────────────────────────────────────
 async function getSimilarPatternBacktestStats() {
   const supabase = getSupabase();
+  if (!supabase) return null;
 
   // 以最新的 screen_date 作为 endDate
   const { data: latestRow, error: latestErr } = await supabase
