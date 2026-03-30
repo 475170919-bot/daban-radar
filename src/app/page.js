@@ -4,11 +4,15 @@ import StockList from "./StockList";
 // 每5分钟重新验证一次缓存（数据每天只更新一次，5分钟足够）
 export const revalidate = 300;
 
-async function getScreenData() {
-  const supabase = createClient(
+function getSupabase() {
+  return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
   );
+}
+
+async function getScreenData() {
+  const supabase = getSupabase();
 
   // 第一步：找出数据库里最新的筛选日期
   const { data: dateRow, error: dateErr } = await supabase
@@ -35,6 +39,159 @@ async function getScreenData() {
   return { stocks: stocks ?? [], screenDate: dateRow.screen_date };
 }
 
+async function getPerformanceStats() {
+  const supabase = getSupabase();
+
+  // 读取所有追踪数据
+  const { data, error } = await supabase
+    .from("daily_performance")
+    .select("score,score_label,close_return,open_return,is_win,screen_date");
+
+  if (error || !data || data.length === 0) return null;
+
+  // 总体统计
+  const total = data.length;
+  const wins = data.filter((d) => d.is_win).length;
+  const avgReturn = data.reduce((s, d) => s + (d.close_return || 0), 0) / total;
+  const avgOpenReturn = data.reduce((s, d) => s + (d.open_return || 0), 0) / total;
+
+  // 按评级分组统计
+  const byLabel = {};
+  for (const d of data) {
+    const label = d.score_label || "未知";
+    if (!byLabel[label]) byLabel[label] = { total: 0, wins: 0, returns: [] };
+    byLabel[label].total++;
+    if (d.is_win) byLabel[label].wins++;
+    byLabel[label].returns.push(d.close_return || 0);
+  }
+
+  const labelStats = Object.entries(byLabel).map(([label, stat]) => ({
+    label,
+    total: stat.total,
+    winRate: stat.total > 0 ? (stat.wins / stat.total * 100) : 0,
+    avgReturn: stat.returns.length > 0
+      ? stat.returns.reduce((a, b) => a + b, 0) / stat.returns.length
+      : 0,
+  }));
+
+  // 按命中率排序
+  labelStats.sort((a, b) => b.winRate - a.winRate);
+
+  // 追踪天数
+  const uniqueDates = new Set(data.map((d) => d.screen_date));
+
+  return {
+    total,
+    wins,
+    winRate: (wins / total * 100),
+    avgReturn,
+    avgOpenReturn,
+    trackDays: uniqueDates.size,
+    labelStats,
+  };
+}
+
+// ─────────────────────────────────────────────
+// 历史相似形态回测（固定模型：2连板 + 9:45前首封 + 封单比<3%）
+// 用过去一年 daily_screens + daily_performance + 次日 daily_screens 组合计算概率
+// ─────────────────────────────────────────────
+async function getSimilarPatternBacktestStats() {
+  const supabase = getSupabase();
+
+  // 以最新的 screen_date 作为 endDate
+  const { data: latestRow, error: latestErr } = await supabase
+    .from("daily_screens")
+    .select("screen_date")
+    .order("screen_date", { ascending: false })
+    .limit(1)
+    .single();
+
+  if (latestErr || !latestRow?.screen_date) return null;
+
+  const endDate = new Date(latestRow.screen_date + "T00:00:00");
+  const startDate = new Date(endDate);
+  startDate.setFullYear(startDate.getFullYear() - 1);
+
+  const startStr = startDate.toISOString().slice(0, 10);
+  const endStr = endDate.toISOString().slice(0, 10);
+
+  // 1) 找出过去一年满足“相似数据模型”的选股事件
+  // first_seal_time 在库中为 HH:MM:SS 字符串，直接做字典序比较即可
+  const { data: events, error: eventsErr } = await supabase
+    .from("daily_screens")
+    .select("screen_date,code,seal_ratio,first_seal_time,board_count")
+    .gte("screen_date", startStr)
+    .lte("screen_date", endStr)
+    .eq("board_count", 2)
+    .lt("seal_ratio", 3)
+    .lte("first_seal_time", "09:45:00");
+
+  if (eventsErr) {
+    console.error("Backtest fetch events error:", eventsErr.message);
+    return null;
+  }
+
+  if (!events || events.length === 0) {
+    return { count: 0, next3Rate: 0, badDayRate: 0 };
+  }
+
+  const eventsKey = new Set(events.map((e) => `${e.screen_date}|${e.code}`));
+  const codes = Array.from(new Set(events.map((e) => e.code))).slice(0, 1000);
+
+  // 2) 取这些事件的次日表现 daily_performance
+  const { data: perfs, error: perfsErr } = await supabase
+    .from("daily_performance")
+    .select("screen_date,code,close_return,is_win,track_date")
+    .gte("screen_date", startStr)
+    .lte("screen_date", endStr)
+    .in("code", codes);
+
+  if (perfsErr) {
+    console.error("Backtest fetch performance error:", perfsErr.message);
+    return null;
+  }
+
+  const matched = (perfs || []).filter((p) => eventsKey.has(`${p.screen_date}|${p.code}`));
+  const count = matched.length;
+  if (count === 0) return { count: 0, next3Rate: 0, badDayRate: 0 };
+
+  // 3) 拉取次日 daily_screens，用来判断“是否晋级3连板”和“是否炸板/收阴”
+  const trackDates = Array.from(new Set(matched.map((m) => m.track_date))).slice(0, 500);
+  const { data: nextScreens, error: nextErr } = await supabase
+    .from("daily_screens")
+    .select("screen_date,code,board_count,open_count")
+    .in("screen_date", trackDates)
+    .in("code", codes);
+
+  if (nextErr) {
+    console.error("Backtest fetch nextScreens error:", nextErr.message);
+    return null;
+  }
+
+  const nextByKey = new Map((nextScreens || []).map((n) => [`${n.screen_date}|${n.code}`, n]));
+
+  let next3Count = 0;
+  let badCount = 0;
+
+  for (const p of matched) {
+    const nextKey = `${p.track_date}|${p.code}`;
+    const next = nextByKey.get(nextKey);
+
+    const isNext3 = (next?.board_count || 0) >= 3;
+    if (isNext3) next3Count++;
+
+    const closeNeg = p.is_win === false || (p.close_return ?? 0) <= 0;
+    const nextOpen = (next?.open_count || 0) > 0;
+    if (closeNeg || nextOpen) badCount++;
+  }
+
+  return {
+    count,
+    next3Rate: (next3Count / count) * 100,
+    badDayRate: (badCount / count) * 100,
+  };
+}
+
 function formatDate(dateStr) {
   if (!dateStr) return "";
   // dateStr 格式：'2026-03-27'，直接解析避免时区问题
@@ -49,8 +206,89 @@ function isToday(dateStr) {
   return dateStr === today;
 }
 
+// ── 评级标签颜色 ──
+const labelColor = {
+  "强烈关注": { text: "text-emerald-400", bg: "bg-emerald-400/15" },
+  "值得观察": { text: "text-amber-400",   bg: "bg-amber-400/15" },
+  "一般":     { text: "text-slate-400",   bg: "bg-slate-400/15" },
+  "谨慎":     { text: "text-red-400",     bg: "bg-red-400/15" },
+};
+
+function HitRateCard({ stats }) {
+  return (
+    <div className="mb-6 bg-slate-800/40 border border-slate-700/50 rounded-xl p-4">
+      <div className="flex items-center gap-2 mb-3">
+        <span className="text-base">📈</span>
+        <h2 className="text-slate-100 font-semibold text-sm">历史命中率</h2>
+        <span className="text-slate-500 text-xs ml-auto">
+          追踪 {stats.trackDays} 个交易日 · {stats.total} 只股票
+        </span>
+      </div>
+
+      {/* 总体指标 */}
+      <div className="grid grid-cols-3 gap-3 mb-4">
+        <div className="text-center">
+          <div className={`text-xl font-bold ${stats.winRate >= 50 ? "text-emerald-400" : "text-red-400"}`}>
+            {stats.winRate.toFixed(1)}%
+          </div>
+          <div className="text-slate-500 text-xs">总命中率</div>
+        </div>
+        <div className="text-center">
+          <div className={`text-xl font-bold ${stats.avgReturn >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+            {stats.avgReturn >= 0 ? "+" : ""}{stats.avgReturn.toFixed(2)}%
+          </div>
+          <div className="text-slate-500 text-xs">平均收盘收益</div>
+        </div>
+        <div className="text-center">
+          <div className={`text-xl font-bold ${stats.avgOpenReturn >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+            {stats.avgOpenReturn >= 0 ? "+" : ""}{stats.avgOpenReturn.toFixed(2)}%
+          </div>
+          <div className="text-slate-500 text-xs">平均开盘收益</div>
+        </div>
+      </div>
+
+      {/* 分评级统计 */}
+      <div className="border-t border-slate-700/40 pt-3 space-y-2">
+        <p className="text-slate-500 text-xs mb-2">各评级命中率</p>
+        {stats.labelStats.map(({ label, total, winRate, avgReturn }) => {
+          const lc = labelColor[label] || { text: "text-slate-400", bg: "bg-slate-400/15" };
+          return (
+            <div key={label} className="flex items-center gap-3 text-sm">
+              <span className={`px-2 py-0.5 rounded text-xs font-medium ${lc.text} ${lc.bg} w-16 text-center shrink-0`}>
+                {label}
+              </span>
+              <div className="flex-1 bg-slate-700 rounded-full h-1.5 overflow-hidden">
+                <div
+                  className="h-full rounded-full"
+                  style={{
+                    width: `${Math.min(winRate, 100)}%`,
+                    backgroundColor: winRate >= 50 ? "#34d399" : "#f87171",
+                  }}
+                />
+              </div>
+              <span className="text-slate-300 text-xs w-12 text-right shrink-0">
+                {winRate.toFixed(0)}%
+              </span>
+              <span className={`text-xs w-14 text-right shrink-0 ${avgReturn >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                {avgReturn >= 0 ? "+" : ""}{avgReturn.toFixed(1)}%
+              </span>
+              <span className="text-slate-600 text-xs w-8 text-right shrink-0">
+                {total}只
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default async function Home() {
-  const { stocks, screenDate } = await getScreenData();
+  const [{ stocks, screenDate }, perfStats, backtestStats] = await Promise.all([
+    getScreenData(),
+    getPerformanceStats(),
+    getSimilarPatternBacktestStats(),
+  ]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -78,6 +316,9 @@ export default async function Home() {
 
       {/* ── 主内容区 ── */}
       <main className="max-w-4xl mx-auto px-4 py-6">
+        {/* ── 历史命中率卡片 ── */}
+        {perfStats && <HitRateCard stats={perfStats} />}
+
         {stocks.length === 0 ? (
           /* 空状态 */
           <div className="text-center py-24">
@@ -90,7 +331,7 @@ export default async function Home() {
             </p>
           </div>
         ) : (
-          <StockList stocks={stocks} />
+          <StockList stocks={stocks} backtestStats={backtestStats} />
         )}
       </main>
 

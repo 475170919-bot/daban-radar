@@ -46,6 +46,14 @@ jobs:
             python scripts/fetch_daily.py
           fi
 
+      - name: 追踪昨日选股的次日表现
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          echo "追踪昨日选股的今日表现"
+          python scripts/fetch_performance.py
+
       - name: 抓取失败时发通知
         if: failure()
         run: |

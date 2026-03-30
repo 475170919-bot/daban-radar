@@ -59,6 +59,97 @@ function getSubScores(stock, sectorCount) {
 }
 
 // ─────────────────────────────────────────────
+// 木桶效应 & 致命缺陷标签
+// 红色：核心子项低于满分40%
+// 黑色：展示当前“瓶颈指标”（木桶效应）
+// ─────────────────────────────────────────────
+function getWoodBucketAndFatalTags(stock, subScores) {
+  const withRatio = subScores.map((s) => ({
+    ...s,
+    ratio: s.max > 0 ? s.score / s.max : 0,
+  }));
+
+  // 瓶颈指标：ratio 最小
+  withRatio.sort((a, b) => a.ratio - b.ratio);
+  const bottleneck = withRatio[0];
+
+  // 致命缺陷：只针对“核心子项”
+  // 不把“板块效应”纳入致命触发，避免过度误伤。
+  const coreLabels = new Set(["封单比", "首封时间", "连板数", "炸板次数"]);
+  const fatal = withRatio.filter((s) => coreLabels.has(s.label) && s.ratio < 0.4);
+  const fatalMessages = fatal.map((s) => {
+    switch (s.label) {
+      case "封单比":
+        return "⚠️ 封盘极弱";
+      case "首封时间":
+        return "⚠️ 首封过慢";
+      case "连板数":
+        return "⚠️ 连板断层";
+      case "炸板次数":
+        return "⚠️ 炸板风险高";
+      default:
+        return "⚠️ 致命缺陷";
+    }
+  });
+
+  // 特例：你强调的“首封极早 + 封单极弱 + 2连板”
+  const timeMin = timeToMinutes(stock.first_seal_time);
+  const sealRatio = stock.seal_ratio || 0;
+  const boardCount = stock.board_count || 1;
+  const isSuperEarly = timeMin <= 5;
+  const isSealWeak = sealRatio < 3;
+  if (isSuperEarly && isSealWeak && boardCount === 2) {
+    fatalMessages.push("⚠️ 情绪板无资金沉淀");
+  }
+
+  // 去重保持顺序
+  const deduped = [];
+  for (const m of fatalMessages) {
+    if (!deduped.includes(m)) deduped.push(m);
+  }
+
+  return {
+    bottleneckLabel: bottleneck?.label ? `木桶效应：${bottleneck.label}` : "木桶效应：—",
+    fatalMessages: deduped,
+  };
+}
+
+// ─────────────────────────────────────────────
+// 次日盘前推演与执行锚点（明日剧本）
+// 基于当日关键维度的“组合规则”生成文本
+// ─────────────────────────────────────────────
+function generateTomorrowScript(stock) {
+  const timeMin = timeToMinutes(stock.first_seal_time);
+  const sealRatio = stock.seal_ratio || 0;
+  const boardCount = stock.board_count || 1;
+  const openCount = stock.open_count || 0;
+
+  const isSuperEarly = timeMin <= 5; // 近似“极早”
+  const isEarly = timeMin <= 15; // 早盘内
+  const isSealWeak = sealRatio < 3; // 你给的口径：封单比<3%算极弱
+  const isSealVeryWeak = sealRatio < 2; // 进一步加强
+
+  if (isSuperEarly && isSealWeak && boardCount === 2) {
+    return "该股首封极早但买盘承接严重不足。明日预期：谨防高开诱多或低开闷杀。操作建议：持筹者若早盘高开不及预期（例如低于3%）或冲高无力，建议果断止盈；空仓者绝对不建议去排板接力3板，炸板风险极高。";
+  }
+
+  if (isSealVeryWeak && boardCount >= 2) {
+    return "封单比偏弱属于“先天短板”。明日预期：更容易在开盘后出现回落或反复换手。操作建议：只看回封质量，不追高；若盘中开板/封单快速流失，优先选择兑现而不是硬扛。";
+  }
+
+  if (openCount >= 2) {
+    return "炸板次数偏多，说明筹码博弈很激烈。明日预期：冲高回落概率上升。操作建议：不做无脑接力，尤其对3板/高位板更要等强承接信号再动。";
+  }
+
+  if (!isEarly && boardCount >= 2) {
+    return "首封时间偏晚，市场拉升的主线支撑可能不足。明日预期：高开时更像情绪宣泄而非加速。操作建议：宁可等分歧确认，也尽量避免首小时追涨。";
+  }
+
+  // 默认保守模板
+  return "整体属于可跟踪的强势股，但仍要用“封单变化 + 开板次数”做风控锚点。明日预期：偏向高波动，但只要封单能维持且不反复开板，就存在延续机会；反之及时止损。";
+}
+
+// ─────────────────────────────────────────────
 // 评分环（SVG）
 // ─────────────────────────────────────────────
 
@@ -102,10 +193,14 @@ function ScoreRing({ score }) {
 // 单只股票卡片
 // ─────────────────────────────────────────────
 
-function StockCard({ stock, sectorCount }) {
+function StockCard({ stock, sectorCount, conceptFirstSealRank, conceptFirstSealTotal, pkSuspected, backtestStats }) {
   const [expanded, setExpanded] = useState(false);
   const { text: scoreText, bg: scoreBg } = getScoreStyle(stock.score);
   const subScores = useMemo(() => getSubScores(stock, sectorCount), [stock, sectorCount]);
+  const { bottleneckLabel, fatalMessages } = useMemo(
+    () => getWoodBucketAndFatalTags(stock, subScores),
+    [stock, subScores]
+  );
 
   // 封单比颜色
   const sealColor =
@@ -163,6 +258,14 @@ function StockCard({ stock, sectorCount }) {
             <span className="text-slate-500 text-xs">
               市值{formatMv(stock.circ_mv)}
             </span>
+
+            {/* 板块内地位（同梯队PK） */}
+            {conceptFirstSealRank && conceptFirstSealTotal ? (
+              <span className={`text-xs ${pkSuspected ? "text-red-400" : "text-slate-500"}`}>
+                板块内地位：首封第{conceptFirstSealRank}/{conceptFirstSealTotal}名
+                {pkSuspected ? "（疑似套利）" : ""}
+              </span>
+            ) : null}
           </div>
         </div>
 
@@ -173,6 +276,21 @@ function StockCard({ stock, sectorCount }) {
           >
             {stock.score_label}
           </span>
+          {/* 红黑标签（放在评分旁边：只在 sm+ 显示，避免主行拥挤） */}
+          <div className="hidden sm:flex items-center gap-2">
+            <span className="px-2 py-1 rounded border border-slate-700/60 bg-slate-950/40 text-slate-200 text-[11px] font-medium max-w-[8.5rem] truncate">
+              {bottleneckLabel}
+            </span>
+            {fatalMessages.slice(0, 1).map((msg) => (
+              <span
+                key={msg}
+                className="px-2 py-1 rounded bg-red-500/20 text-red-200 text-[11px] font-medium max-w-[7.5rem] truncate"
+                title={msg}
+              >
+                {msg.replace("⚠️ ", "")}
+              </span>
+            ))}
+          </div>
           {expanded
             ? <ChevronUp className="w-4 h-4 text-slate-500" />
             : <ChevronDown className="w-4 h-4 text-slate-500" />
@@ -207,12 +325,70 @@ function StockCard({ stock, sectorCount }) {
           </div>
 
           {/* 总分行 */}
-          <div className="mt-3 pt-3 border-t border-slate-700/30 flex items-center justify-between">
-            <span className="text-slate-500 text-sm">综合评分</span>
-            <span className={`font-bold text-lg ${scoreText}`}>
-              {stock.score}分 · {stock.score_label}
-            </span>
+          <div className="mt-3 pt-3 border-t border-slate-700/30 flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+            <div className="flex items-center gap-3">
+              <span className="text-slate-500 text-sm shrink-0">综合评分</span>
+              <span className={`font-bold text-lg ${scoreText}`}>{stock.score}分 · {stock.score_label}</span>
+            </div>
+
+            {/* 红黑标签：木桶效应 + 致命缺陷（放到评分旁边） */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="px-2 py-1 rounded border border-slate-700/60 bg-slate-950/40 text-slate-200 text-xs font-medium">
+                {bottleneckLabel}
+              </span>
+              {fatalMessages.map((msg) => (
+                <span key={msg} className="px-2 py-1 rounded bg-red-500/20 text-red-200 text-xs font-medium">
+                  {msg}
+                </span>
+              ))}
+            </div>
           </div>
+
+          {/* 明日剧本 */}
+          <div className="mt-3 bg-slate-950/20 border border-slate-700/40 rounded-lg p-3">
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <span className="text-slate-300 text-xs font-medium">次日盘前推演与执行锚点</span>
+              <span className="text-slate-500 text-[10px]">基于当日维度自动生成</span>
+            </div>
+            <p className="text-slate-100 text-sm leading-relaxed">
+              {generateTomorrowScript(stock)}
+            </p>
+          </div>
+
+          {/* 历史相似形态回测（灰色小字） */}
+          {(() => {
+            const timeMin = timeToMinutes(stock.first_seal_time);
+            const isSimilarPattern =
+              (stock.board_count || 1) === 2 &&
+              timeMin <= 15 && // 9:45 前
+              (stock.seal_ratio || 0) < 3; // 封单比低于3%
+
+            if (!isSimilarPattern) return null;
+            if (!backtestStats) {
+              return (
+                <p className="mt-2 text-slate-500 text-xs">
+                  历史回测：暂无可用样本，先以风险提示为先。
+                </p>
+              );
+            }
+
+            const count = backtestStats.count ?? 0;
+            if (count === 0) {
+              return (
+                <p className="mt-2 text-slate-500 text-xs">
+                  历史回测：样本不足（近一年匹配条件为0次）。
+                </p>
+              );
+            }
+
+            return (
+              <p className="mt-2 text-slate-500 text-xs leading-relaxed">
+                历史回测：过去一年出现相似数据模型共 {count} 次，次日晋级3连板成功率仅为{" "}
+                {backtestStats.next3Rate.toFixed(1)}%，次日收阴（或炸板）概率高达{" "}
+                {backtestStats.badDayRate.toFixed(1)}%。
+              </p>
+            );
+          })()}
         </div>
       )}
     </div>
@@ -330,7 +506,7 @@ function FilterBar({ sortBy, setSortBy, filterLabel, setFilterLabel, total, filt
 // 主组件（由 page.js 调用）
 // ─────────────────────────────────────────────
 
-export default function StockList({ stocks }) {
+export default function StockList({ stocks, backtestStats }) {
   const [sortBy, setSortBy]           = useState("score");
   const [filterLabel, setFilterLabel] = useState("all");
 
@@ -341,6 +517,40 @@ export default function StockList({ stocks }) {
       if (s.concept) counts[s.concept] = (counts[s.concept] || 0) + 1;
     });
     return counts;
+  }, [stocks]);
+
+  // 板块内地位（同板块首封时间排名 + 早封不封死疑似套利）
+  const conceptPkByCode = useMemo(() => {
+    const byConcept = {};
+    stocks.forEach((s) => {
+      if (!s.concept) return;
+      byConcept[s.concept] = byConcept[s.concept] || [];
+      byConcept[s.concept].push(s);
+    });
+
+    const map = {};
+    for (const concept of Object.keys(byConcept)) {
+      const list = byConcept[concept];
+      list.sort((a, b) => timeToMinutes(a.first_seal_time) - timeToMinutes(b.first_seal_time));
+      const total = list.length;
+      for (let i = 0; i < list.length; i++) {
+        const s = list[i];
+        const sealRatio = s.seal_ratio || 0;
+        // “疑似套利”：它首封最早，但封单比比同板块所有晚封票都还低
+        const minLateSeal =
+          i === 0 && list.length > 1
+            ? Math.min(...list.slice(1).map((x) => x.seal_ratio || 0))
+            : null;
+
+        const pkSuspected = i === 0 && minLateSeal !== null && sealRatio < minLateSeal;
+        map[s.code] = {
+          conceptFirstSealRank: i + 1,
+          conceptFirstSealTotal: total,
+          pkSuspected,
+        };
+      }
+    }
+    return map;
   }, [stocks]);
 
   // 筛选 + 排序
@@ -387,6 +597,10 @@ export default function StockList({ stocks }) {
               key={stock.code}
               stock={stock}
               sectorCount={(sectorCounts[stock.concept] || 1) - 1}
+              conceptFirstSealRank={conceptPkByCode[stock.code]?.conceptFirstSealRank}
+              conceptFirstSealTotal={conceptPkByCode[stock.code]?.conceptFirstSealTotal}
+              pkSuspected={conceptPkByCode[stock.code]?.pkSuspected}
+              backtestStats={backtestStats}
             />
           ))}
         </div>
