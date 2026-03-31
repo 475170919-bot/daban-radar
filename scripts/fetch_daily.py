@@ -408,6 +408,29 @@ def main():
     # 3. 打分 & 整理成数据库行
     rows = [build_row(s, screen_date) for s in stocks]
 
+    # 4. 板块内PK排名（按首封时间升序 + 封单比降序综合排名）
+    by_sector = {}
+    for row in rows:
+        sector = row.get("concept", "")
+        if sector:
+            by_sector.setdefault(sector, []).append(row)
+
+    for sector, group in by_sector.items():
+        # 排名规则：首封时间越早越好，同时间则封单比越高越好
+        group.sort(key=lambda r: (
+            time_to_minutes(r.get("first_seal_time", "")),
+            -(r.get("seal_ratio", 0) or 0),
+        ))
+        total = len(group)
+        for rank, row in enumerate(group, 1):
+            row["sector_rank"] = rank
+            row["sector_total"] = total
+
+    # 没有行业的股票也要填默认值
+    for row in rows:
+        row.setdefault("sector_rank", 1)
+        row.setdefault("sector_total", 1)
+
     # 按分数降序排列（方便查看日志）
     rows.sort(key=lambda r: r["score"], reverse=True)
 

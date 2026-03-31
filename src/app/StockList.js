@@ -193,7 +193,7 @@ function ScoreRing({ score }) {
 // 单只股票卡片
 // ─────────────────────────────────────────────
 
-function StockCard({ stock, sectorCount, conceptFirstSealRank, conceptFirstSealTotal, pkSuspected, backtestStats }) {
+function StockCard({ stock, sectorCount, backtestStats }) {
   const [expanded, setExpanded] = useState(false);
   const { text: scoreText, bg: scoreBg } = getScoreStyle(stock.score);
   const subScores = useMemo(() => getSubScores(stock, sectorCount), [stock, sectorCount]);
@@ -263,13 +263,23 @@ function StockCard({ stock, sectorCount, conceptFirstSealRank, conceptFirstSealT
               市值{formatMv(stock.circ_mv)}
             </span>
 
-            {/* 板块内地位（同梯队PK） */}
-            {conceptFirstSealRank && conceptFirstSealTotal ? (
-              <span className={`text-xs ${pkSuspected ? "text-red-400" : "text-slate-500"}`}>
-                板块内地位：首封第{conceptFirstSealRank}/{conceptFirstSealTotal}名
-                {pkSuspected ? "（疑似套利）" : ""}
-              </span>
-            ) : null}
+            {/* 板块内PK */}
+            {stock.sector_total > 1 && (
+              <>
+                <span className="text-slate-500 text-xs">
+                  {stock.concept}板块 涨停{stock.sector_total}只 排名第{stock.sector_rank}
+                </span>
+                {stock.sector_rank === 1 ? (
+                  <span className="px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 text-xs rounded font-medium">
+                    龙头
+                  </span>
+                ) : stock.sector_rank > Math.ceil(stock.sector_total / 2) ? (
+                  <span className="px-1.5 py-0.5 bg-slate-600/40 text-slate-400 text-xs rounded">
+                    跟风
+                  </span>
+                ) : null}
+              </>
+            )}
           </div>
         </div>
 
@@ -524,40 +534,6 @@ export default function StockList({ stocks, backtestStats }) {
     return counts;
   }, [stocks]);
 
-  // 板块内地位（同板块首封时间排名 + 早封不封死疑似套利）
-  const conceptPkByCode = useMemo(() => {
-    const byConcept = {};
-    stocks.forEach((s) => {
-      if (!s.concept) return;
-      byConcept[s.concept] = byConcept[s.concept] || [];
-      byConcept[s.concept].push(s);
-    });
-
-    const map = {};
-    for (const concept of Object.keys(byConcept)) {
-      const list = byConcept[concept];
-      list.sort((a, b) => timeToMinutes(a.first_seal_time) - timeToMinutes(b.first_seal_time));
-      const total = list.length;
-      for (let i = 0; i < list.length; i++) {
-        const s = list[i];
-        const sealRatio = s.seal_ratio || 0;
-        // “疑似套利”：它首封最早，但封单比比同板块所有晚封票都还低
-        const minLateSeal =
-          i === 0 && list.length > 1
-            ? Math.min(...list.slice(1).map((x) => x.seal_ratio || 0))
-            : null;
-
-        const pkSuspected = i === 0 && minLateSeal !== null && sealRatio < minLateSeal;
-        map[s.code] = {
-          conceptFirstSealRank: i + 1,
-          conceptFirstSealTotal: total,
-          pkSuspected,
-        };
-      }
-    }
-    return map;
-  }, [stocks]);
-
   // 筛选 + 排序
   const displayList = useMemo(() => {
     let list = filterLabel === "all"
@@ -602,9 +578,6 @@ export default function StockList({ stocks, backtestStats }) {
               key={stock.code}
               stock={stock}
               sectorCount={(sectorCounts[stock.concept] || 1) - 1}
-              conceptFirstSealRank={conceptPkByCode[stock.code]?.conceptFirstSealRank}
-              conceptFirstSealTotal={conceptPkByCode[stock.code]?.conceptFirstSealTotal}
-              pkSuspected={conceptPkByCode[stock.code]?.pkSuspected}
               backtestStats={backtestStats}
             />
           ))}
