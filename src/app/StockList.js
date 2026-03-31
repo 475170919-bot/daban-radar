@@ -9,29 +9,27 @@ import { patternKey } from "./utils/patternUtils";
 // ─────────────────────────────────────────────
 
 function getScoreStyle(score) {
-  if (score >= 85) return { text: "text-emerald-400", bg: "bg-emerald-400/10", hex: "#34d399" };
-  if (score >= 70) return { text: "text-amber-400",   bg: "bg-amber-400/10",   hex: "#fbbf24" };
-  if (score >= 50) return { text: "text-slate-400",   bg: "bg-slate-400/10",   hex: "#94a3b8" };
-  return               { text: "text-red-400",    bg: "bg-red-400/10",    hex: "#f87171" };
+  if (score >= 85) return { text: "text-emerald-600", bg: "bg-emerald-50", hex: "#059669" };
+  if (score >= 70) return { text: "text-amber-600",   bg: "bg-amber-50",   hex: "#d97706" };
+  if (score >= 50) return { text: "text-gray-500",    bg: "bg-gray-100",   hex: "#6b7280" };
+  return               { text: "text-red-500",     bg: "bg-red-50",     hex: "#ef4444" };
 }
 
-// 把 "HH:MM:SS" 转换成距开盘 9:30 的分钟数
 function timeToMinutes(timeStr) {
   if (!timeStr) return 999;
   const parts = timeStr.split(":");
   if (parts.length < 2) return 999;
   const total = parseInt(parts[0]) * 60 + parseInt(parts[1]);
-  return Math.max(0, total - 570); // 570 = 9×60+30
+  return Math.max(0, total - 570);
 }
 
-// 把流通市值（元）转成"XX.X亿"
 function formatMv(yuan) {
   if (!yuan) return "-";
   return (yuan / 1e8).toFixed(1) + "亿";
 }
 
 // ─────────────────────────────────────────────
-// 评分子项重计算（与 Python 脚本逻辑一致）
+// 评分子项重计算
 // ─────────────────────────────────────────────
 
 function getSubScores(stock, sectorCount) {
@@ -61,8 +59,6 @@ function getSubScores(stock, sectorCount) {
 
 // ─────────────────────────────────────────────
 // 木桶效应 & 致命缺陷标签
-// 红色：核心子项低于满分40%
-// 黑色：展示当前“瓶颈指标”（木桶效应）
 // ─────────────────────────────────────────────
 function getWoodBucketAndFatalTags(stock, subScores) {
   const withRatio = subScores.map((s) => ({
@@ -70,40 +66,28 @@ function getWoodBucketAndFatalTags(stock, subScores) {
     ratio: s.max > 0 ? s.score / s.max : 0,
   }));
 
-  // 瓶颈指标：ratio 最小
   withRatio.sort((a, b) => a.ratio - b.ratio);
   const bottleneck = withRatio[0];
 
-  // 致命缺陷：只针对“核心子项”
-  // 不把“板块效应”纳入致命触发，避免过度误伤。
   const coreLabels = new Set(["封单比", "首封时间", "连板数", "炸板次数"]);
   const fatal = withRatio.filter((s) => coreLabels.has(s.label) && s.ratio < 0.4);
   const fatalMessages = fatal.map((s) => {
     switch (s.label) {
-      case "封单比":
-        return "⚠️ 封盘极弱";
-      case "首封时间":
-        return "⚠️ 首封过慢";
-      case "连板数":
-        return "⚠️ 连板断层";
-      case "炸板次数":
-        return "⚠️ 炸板风险高";
-      default:
-        return "⚠️ 致命缺陷";
+      case "封单比":     return "封盘极弱";
+      case "首封时间":   return "首封过慢";
+      case "连板数":     return "连板断层";
+      case "炸板次数":   return "炸板风险高";
+      default:          return "致命缺陷";
     }
   });
 
-  // 特例：你强调的“首封极早 + 封单极弱 + 2连板”
   const timeMin = timeToMinutes(stock.first_seal_time);
   const sealRatio = stock.seal_ratio || 0;
   const boardCount = stock.board_count || 1;
-  const isSuperEarly = timeMin <= 5;
-  const isSealWeak = sealRatio < 3;
-  if (isSuperEarly && isSealWeak && boardCount === 2) {
-    fatalMessages.push("⚠️ 情绪板无资金沉淀");
+  if (timeMin <= 5 && sealRatio < 3 && boardCount === 2) {
+    fatalMessages.push("情绪板无资金沉淀");
   }
 
-  // 去重保持顺序
   const deduped = [];
   for (const m of fatalMessages) {
     if (!deduped.includes(m)) deduped.push(m);
@@ -116,8 +100,7 @@ function getWoodBucketAndFatalTags(stock, subScores) {
 }
 
 // ─────────────────────────────────────────────
-// 次日盘前推演与执行锚点（明日剧本）
-// 基于当日关键维度的“组合规则”生成文本
+// 明日剧本
 // ─────────────────────────────────────────────
 function generateTomorrowScript(stock) {
   const timeMin = timeToMinutes(stock.first_seal_time);
@@ -125,29 +108,28 @@ function generateTomorrowScript(stock) {
   const boardCount = stock.board_count || 1;
   const openCount = stock.open_count || 0;
 
-  const isSuperEarly = timeMin <= 5; // 近似“极早”
-  const isEarly = timeMin <= 15; // 早盘内
-  const isSealWeak = sealRatio < 3; // 你给的口径：封单比<3%算极弱
-  const isSealVeryWeak = sealRatio < 2; // 进一步加强
+  const isSuperEarly = timeMin <= 5;
+  const isEarly = timeMin <= 15;
+  const isSealWeak = sealRatio < 3;
+  const isSealVeryWeak = sealRatio < 2;
 
   if (isSuperEarly && isSealWeak && boardCount === 2) {
-    return "该股首封极早但买盘承接严重不足。明日预期：谨防高开诱多或低开闷杀。操作建议：持筹者若早盘高开不及预期（例如低于3%）或冲高无力，建议果断止盈；空仓者绝对不建议去排板接力3板，炸板风险极高。";
+    return '该股首封极早但买盘承接严重不足。明日预期：谨防高开诱多或低开闷杀。操作建议：持筹者若早盘高开不及预期（例如低于3%）或冲高无力，建议果断止盈；空仓者绝对不建议去排板接力3板，炸板风险极高。';
   }
 
   if (isSealVeryWeak && boardCount >= 2) {
-    return "封单比偏弱属于“先天短板”。明日预期：更容易在开盘后出现回落或反复换手。操作建议：只看回封质量，不追高；若盘中开板/封单快速流失，优先选择兑现而不是硬扛。";
+    return '封单比偏弱属于\'先天短板\'。明日预期：更容易在开盘后出现回落或反复换手。操作建议：只看回封质量，不追高；若盘中开板/封单快速流失，优先选择兑现而不是硬扛。';
   }
 
   if (openCount >= 2) {
-    return "炸板次数偏多，说明筹码博弈很激烈。明日预期：冲高回落概率上升。操作建议：不做无脑接力，尤其对3板/高位板更要等强承接信号再动。";
+    return '炸板次数偏多，说明筹码博弈很激烈。明日预期：冲高回落概率上升。操作建议：不做无脑接力，尤其对3板/高位板更要等强承接信号再动。';
   }
 
   if (!isEarly && boardCount >= 2) {
-    return "首封时间偏晚，市场拉升的主线支撑可能不足。明日预期：高开时更像情绪宣泄而非加速。操作建议：宁可等分歧确认，也尽量避免首小时追涨。";
+    return '首封时间偏晚，市场拉升的主线支撑可能不足。明日预期：高开时更像情绪宣泄而非加速。操作建议：宁可等分歧确认，也尽量避免首小时追涨。';
   }
 
-  // 默认保守模板
-  return "整体属于可跟踪的强势股，但仍要用“封单变化 + 开板次数”做风控锚点。明日预期：偏向高波动，但只要封单能维持且不反复开板，就存在延续机会；反之及时止损。";
+  return '整体属于可跟踪的强势股，但仍要用\'封单变化 + 开板次数\'做风控锚点。明日预期：偏向高波动，但只要封单能维持且不反复开板，就存在延续机会；反之及时止损。';
 }
 
 // ─────────────────────────────────────────────
@@ -155,34 +137,31 @@ function generateTomorrowScript(stock) {
 // ─────────────────────────────────────────────
 
 function ScoreRing({ score }) {
-  const r = 24;
-  const circ = 2 * Math.PI * r; // ≈150.8
+  const r = 20;
+  const circ = 2 * Math.PI * r;
   const offset = circ * (1 - score / 100);
   const { hex } = getScoreStyle(score);
 
   return (
-    <svg width="60" height="60" viewBox="0 0 60 60" className="shrink-0">
-      {/* 背景轨道 */}
-      <circle cx="30" cy="30" r={r} fill="none" stroke="#1e293b" strokeWidth="5" />
-      {/* 进度弧 */}
+    <svg width="48" height="48" viewBox="0 0 48 48" className="shrink-0">
+      <circle cx="24" cy="24" r={r} fill="none" stroke="#e5e7eb" strokeWidth="4" />
       <circle
-        cx="30" cy="30" r={r}
+        cx="24" cy="24" r={r}
         fill="none"
         stroke={hex}
-        strokeWidth="5"
+        strokeWidth="4"
         strokeLinecap="round"
         strokeDasharray={circ}
         strokeDashoffset={offset}
-        transform="rotate(-90 30 30)"
+        transform="rotate(-90 24 24)"
       />
-      {/* 分数文字 */}
       <text
-        x="30" y="35"
+        x="24" y="28"
         textAnchor="middle"
         fill={hex}
-        fontSize="15"
+        fontSize="13"
         fontWeight="700"
-        fontFamily="var(--font-geist-sans), sans-serif"
+        fontFamily="ui-monospace, 'SF Mono', monospace"
       >
         {score}
       </text>
@@ -203,134 +182,124 @@ function StockCard({ stock, sectorCount, backtestMap }) {
     [stock, subScores]
   );
 
-  // 优先使用数据库存储的 warnings（后端计算），没有则回退到客户端计算
   const dbWarnings = stock.warnings || [];
-  const warnings = dbWarnings.length > 0 ? dbWarnings : clientFatalMessages;
+  const rawWarnings = dbWarnings.length > 0 ? dbWarnings : clientFatalMessages;
+  const warnings = rawWarnings.map((w) => typeof w === "string" ? w.replace(/^⚠️?\s*/, "") : w);
 
-  // 封单比颜色
   const sealColor =
-    stock.seal_ratio >= 10 ? "text-emerald-400" :
-    stock.seal_ratio >= 5  ? "text-amber-400"   : "text-slate-400";
+    stock.seal_ratio >= 10 ? "text-emerald-600" :
+    stock.seal_ratio >= 5  ? "text-amber-600"   : "text-gray-500";
 
-  // 首封时间颜色
   const timeMin = timeToMinutes(stock.first_seal_time);
   const timeColor =
-    timeMin <= 5  ? "text-emerald-400" :
-    timeMin <= 30 ? "text-amber-400"   : "text-slate-400";
+    timeMin <= 5  ? "text-emerald-600" :
+    timeMin <= 30 ? "text-amber-600"   : "text-gray-500";
+
+  // 板块信息文字
+  const sectorInfo = stock.sector_total > 1
+    ? `${stock.concept}板块${stock.sector_total}只 排名#${stock.sector_rank}`
+    : null;
 
   return (
-    <div className="bg-slate-800/40 border border-slate-700/50 rounded-xl overflow-hidden hover:border-slate-600/60 transition-colors">
-      {/* ── 主行（点击展开/收起） ── */}
+    <div className="bg-[#f8f9fa] border border-gray-200 rounded-xl overflow-hidden hover:border-gray-300 transition-colors">
+      {/* ── 主行 ── */}
       <button
-        className="w-full text-left p-4 flex items-center gap-4"
+        className="w-full text-left px-4 py-3 flex items-center gap-3"
         onClick={() => setExpanded(!expanded)}
       >
+        {/* 左侧：评分环 */}
         <ScoreRing score={stock.score} />
 
-        {/* 股票基本信息 */}
+        {/* 中间：股票信息（水平排列） */}
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-slate-100 font-semibold text-base leading-tight">
+          {/* 第一行：名称 + 代码 + 标签 */}
+          <div className="flex items-center gap-2 flex-nowrap overflow-hidden">
+            <span className="text-gray-900 font-semibold text-sm whitespace-nowrap">
               {stock.name}
             </span>
-            <span className="text-slate-500 text-xs">{stock.code}</span>
+            <span className="text-gray-400 text-xs font-mono whitespace-nowrap">{stock.code}</span>
 
-            {/* 连板标签 */}
             {stock.board_count > 1 && (
-              <span className="px-1.5 py-0.5 bg-red-500/20 text-red-400 text-xs rounded font-medium">
+              <span className="px-1.5 py-0.5 bg-red-50 text-red-500 text-[11px] rounded font-medium whitespace-nowrap">
                 {stock.board_count}连板
               </span>
             )}
 
-            {/* 炸板警告 */}
             {stock.open_count > 0 && (
-              <span className="px-1.5 py-0.5 bg-orange-500/15 text-orange-400 text-xs rounded">
+              <span className="px-1.5 py-0.5 bg-orange-50 text-orange-500 text-[11px] rounded whitespace-nowrap">
                 炸{stock.open_count}次
+              </span>
+            )}
+
+            {stock.sector_rank === 1 && stock.sector_total > 1 && (
+              <span className="px-1.5 py-0.5 bg-emerald-50 text-emerald-600 text-[11px] rounded font-medium whitespace-nowrap">
+                龙头
+              </span>
+            )}
+            {stock.sector_rank > 1 && stock.sector_rank > Math.ceil((stock.sector_total || 1) / 2) && (
+              <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 text-[11px] rounded whitespace-nowrap">
+                跟风
               </span>
             )}
           </div>
 
-          <div className="flex items-center gap-3 mt-1.5 text-sm flex-wrap">
+          {/* 第二行：指标横排，用 · 分隔 */}
+          <div className="flex items-center gap-0 mt-1 text-xs whitespace-nowrap overflow-hidden text-ellipsis">
             {stock.concept && (
-              <span className="text-slate-500 text-xs">{stock.concept}</span>
+              <span className="text-gray-400">{stock.concept}</span>
             )}
-            <span className={`font-medium ${sealColor}`}>
-              封单{stock.seal_ratio?.toFixed(1)}%
-            </span>
-            <span className={timeColor}>
-              首封{stock.first_seal_time?.slice(0, 5) || "-"}
-            </span>
-            <span className="text-slate-500 text-xs">
-              市值{formatMv(stock.circ_mv)}
-            </span>
-
-            {/* 板块内PK */}
-            {stock.sector_total > 1 && (
+            <span className="text-gray-300 mx-1.5">·</span>
+            <span className={sealColor}>封单{stock.seal_ratio?.toFixed(1)}%</span>
+            <span className="text-gray-300 mx-1.5">·</span>
+            <span className={timeColor}>首封{stock.first_seal_time?.slice(0, 5) || "-"}</span>
+            <span className="text-gray-300 mx-1.5">·</span>
+            <span className="text-gray-400">市值{formatMv(stock.circ_mv)}</span>
+            {sectorInfo && (
               <>
-                <span className="text-slate-500 text-xs">
-                  {stock.concept}板块 涨停{stock.sector_total}只 排名第{stock.sector_rank}
-                </span>
-                {stock.sector_rank === 1 ? (
-                  <span className="px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 text-xs rounded font-medium">
-                    龙头
-                  </span>
-                ) : stock.sector_rank > Math.ceil(stock.sector_total / 2) ? (
-                  <span className="px-1.5 py-0.5 bg-slate-600/40 text-slate-400 text-xs rounded">
-                    跟风
-                  </span>
-                ) : null}
+                <span className="text-gray-300 mx-1.5">·</span>
+                <span className="text-gray-400">{sectorInfo}</span>
               </>
             )}
           </div>
         </div>
 
-        {/* 评级 + 展开箭头 */}
-        <div className="flex items-center gap-2 shrink-0">
-          <span
-            className={`hidden sm:inline-block px-2 py-1 rounded text-xs font-medium ${scoreText} ${scoreBg}`}
-          >
+        {/* 右侧：评级标签 + 预警 + 箭头，竖向排列 */}
+        <div className="flex flex-col items-end gap-1 shrink-0">
+          <span className={`px-2 py-0.5 rounded text-[11px] font-medium ${scoreText} ${scoreBg}`}>
             {stock.score_label}
           </span>
-          {/* 致命缺陷预警标签（红底白字，评分旁边） */}
           {warnings.length > 0 && (
-            <div className="hidden sm:flex items-center gap-1.5">
-              {warnings.slice(0, 2).map((w) => (
-                <span
-                  key={w}
-                  className="px-2 py-0.5 rounded bg-red-600 text-white text-[11px] font-semibold"
-                >
-                  ⚠ {typeof w === "string" ? w.replace(/^⚠️?\s*/, "") : w}
-                </span>
-              ))}
-            </div>
+            <span className="px-2 py-0.5 rounded bg-red-500 text-white text-[10px] font-semibold whitespace-nowrap">
+              {warnings[0]}
+            </span>
           )}
           {expanded
-            ? <ChevronUp className="w-4 h-4 text-slate-500" />
-            : <ChevronDown className="w-4 h-4 text-slate-500" />
+            ? <ChevronUp className="w-3.5 h-3.5 text-gray-400" />
+            : <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
           }
         </div>
       </button>
 
       {/* ── 展开：评分细节 ── */}
       {expanded && (
-        <div className="px-4 pb-4 border-t border-slate-700/40">
-          <div className="mt-3 space-y-2.5">
+        <div className="px-4 pb-4 border-t border-gray-200">
+          <div className="mt-3 space-y-2">
             {subScores.map(({ label, value, score, max }) => {
               const pct = (score / max) * 100;
               const barHex =
-                pct >= 80 ? "#34d399" : pct >= 50 ? "#fbbf24" : "#94a3b8";
+                pct >= 80 ? "#059669" : pct >= 50 ? "#d97706" : "#9ca3af";
               return (
                 <div key={label} className="flex items-center gap-3 text-sm">
-                  <span className="w-16 text-slate-400 shrink-0">{label}</span>
-                  <span className="w-14 text-slate-300 shrink-0 text-right">{value}</span>
-                  <div className="flex-1 bg-slate-700 rounded-full h-1.5 overflow-hidden">
+                  <span className="w-16 text-gray-500 shrink-0 text-xs">{label}</span>
+                  <span className="w-14 text-gray-700 shrink-0 text-right text-xs font-mono">{value}</span>
+                  <div className="flex-1 bg-gray-200 rounded-full h-1.5 overflow-hidden">
                     <div
                       className="h-full rounded-full"
                       style={{ width: `${pct}%`, backgroundColor: barHex }}
                     />
                   </div>
-                  <span className="text-slate-500 text-xs w-11 text-right shrink-0">
-                    {score}/{max}分
+                  <span className="text-gray-400 text-xs w-11 text-right shrink-0 font-mono">
+                    {score}/{max}
                   </span>
                 </div>
               );
@@ -338,67 +307,64 @@ function StockCard({ stock, sectorCount, backtestMap }) {
           </div>
 
           {/* 总分行 */}
-          <div className="mt-3 pt-3 border-t border-slate-700/30 flex flex-col md:flex-row md:items-center md:justify-between gap-2">
-            <div className="flex items-center gap-3">
-              <span className="text-slate-500 text-sm shrink-0">综合评分</span>
-              <span className={`font-bold text-lg ${scoreText}`}>{stock.score}分 · {stock.score_label}</span>
+          <div className="mt-3 pt-3 border-t border-gray-200 flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2">
+              <span className="text-gray-400 text-xs">综合评分</span>
+              <span className={`font-bold text-base font-mono ${scoreText}`}>{stock.score}</span>
+              <span className={`px-2 py-0.5 rounded text-xs font-medium ${scoreText} ${scoreBg}`}>{stock.score_label}</span>
             </div>
 
-            {/* 致命缺陷预警标签（红底白字） */}
-            {warnings.length > 0 && (
-              <div className="flex flex-wrap items-center gap-2">
-                {warnings.map((w) => (
-                  <span key={w} className="px-2 py-1 rounded bg-red-600 text-white text-xs font-semibold">
-                    ⚠ {typeof w === "string" ? w.replace(/^⚠️?\s*/, "") : w}
-                  </span>
-                ))}
-              </div>
-            )}
-            {/* 木桶效应 */}
-            <span className="px-2 py-1 rounded border border-slate-700/60 bg-slate-950/40 text-slate-200 text-xs font-medium">
-              {bottleneckLabel}
-            </span>
+            <div className="flex items-center gap-2 flex-wrap">
+              {warnings.length > 0 && warnings.map((w) => (
+                <span key={w} className="px-2 py-0.5 rounded bg-red-500 text-white text-[11px] font-semibold">
+                  {w}
+                </span>
+              ))}
+              <span className="px-2 py-0.5 rounded border border-gray-200 text-gray-500 text-[11px]">
+                {bottleneckLabel}
+              </span>
+            </div>
           </div>
 
           {/* 明日剧本 */}
-          <div className="mt-3 bg-slate-950/20 border border-slate-700/40 rounded-lg p-3">
+          <div className="mt-3 bg-white border border-gray-200 rounded-lg p-3">
             <div className="flex items-center justify-between gap-2 mb-1">
-              <span className="text-slate-300 text-xs font-medium">明日剧本</span>
-              <span className="text-slate-500 text-[10px]">规则引擎自动生成</span>
+              <span className="text-gray-600 text-xs font-medium">明日剧本</span>
+              <span className="text-gray-300 text-[10px]">规则引擎自动生成</span>
             </div>
-            <p className="text-slate-100 text-sm leading-relaxed">
+            <p className="text-gray-700 text-xs leading-relaxed">
               {stock.prediction || generateTomorrowScript(stock)}
             </p>
           </div>
 
-          {/* 历史相似形态回测（按 patternKey 个性化匹配） */}
+          {/* 历史相似形态回测 */}
           {(() => {
             if (!backtestMap) return null;
             const pk = patternKey(stock.board_count || 1, stock.first_seal_time || "", stock.seal_ratio || 0);
             const stats = backtestMap[pk];
             if (!stats || stats.sampleCount === 0) {
               return (
-                <p className="mt-2 text-slate-500 text-xs">
+                <p className="mt-2 text-gray-400 text-xs">
                   历史回测：该形态近3个月样本不足，暂无统计数据。
                 </p>
               );
             }
 
-            const winColor = stats.winRate >= 60 ? "text-emerald-400" : stats.winRate >= 40 ? "text-amber-400" : "text-red-400";
-            const avgColor = stats.avgCloseReturn >= 0 ? "text-emerald-400" : "text-red-400";
+            const winColor = stats.winRate >= 60 ? "text-emerald-600" : stats.winRate >= 40 ? "text-amber-600" : "text-red-500";
+            const avgColor = stats.avgCloseReturn >= 0 ? "text-emerald-600" : "text-red-500";
 
             return (
-              <div className="mt-2 bg-slate-950/20 border border-slate-700/40 rounded-lg p-3">
+              <div className="mt-3 bg-white border border-gray-200 rounded-lg p-3">
                 <div className="flex items-center gap-2 mb-1">
-                  <span className="text-slate-400 text-xs font-medium">📊 历史相似形态回测</span>
-                  <span className="text-slate-600 text-[10px]">近3个月</span>
+                  <span className="text-gray-600 text-xs font-medium">历史相似形态回测</span>
+                  <span className="text-gray-300 text-[10px]">近3个月</span>
                 </div>
-                <p className="text-slate-300 text-xs leading-relaxed">
-                  相似形态共出现 <span className="text-slate-100 font-medium">{stats.sampleCount}</span> 次，
-                  次日盈利率 <span className={`font-medium ${winColor}`}>{stats.winRate.toFixed(1)}%</span>，
-                  平均收盘涨幅 <span className={`font-medium ${avgColor}`}>{stats.avgCloseReturn >= 0 ? "+" : ""}{stats.avgCloseReturn.toFixed(2)}%</span>
+                <p className="text-gray-600 text-xs leading-relaxed">
+                  相似形态共出现 <span className="text-gray-900 font-medium font-mono">{stats.sampleCount}</span> 次，
+                  次日盈利率 <span className={`font-medium font-mono ${winColor}`}>{stats.winRate.toFixed(1)}%</span>，
+                  平均收盘涨幅 <span className={`font-medium font-mono ${avgColor}`}>{stats.avgCloseReturn >= 0 ? "+" : ""}{stats.avgCloseReturn.toFixed(2)}%</span>
                   {stats.avgOpenReturn !== undefined && (
-                    <>，平均开盘涨幅 <span className={`font-medium ${stats.avgOpenReturn >= 0 ? "text-emerald-400" : "text-red-400"}`}>{stats.avgOpenReturn >= 0 ? "+" : ""}{stats.avgOpenReturn.toFixed(2)}%</span></>
+                    <>，平均开盘涨幅 <span className={`font-medium font-mono ${stats.avgOpenReturn >= 0 ? "text-emerald-600" : "text-red-500"}`}>{stats.avgOpenReturn >= 0 ? "+" : ""}{stats.avgOpenReturn.toFixed(2)}%</span></>
                   )}
                 </p>
               </div>
@@ -411,7 +377,7 @@ function StockCard({ stock, sectorCount, backtestMap }) {
 }
 
 // ─────────────────────────────────────────────
-// 统计概览（顶部4格）
+// 统计概览（横排5格）
 // ─────────────────────────────────────────────
 
 function StatsHeader({ stocks }) {
@@ -424,25 +390,25 @@ function StatsHeader({ stocks }) {
     : "0";
 
   const stats = [
-    { label: "涨停总数",   value: total,     unit: "只", color: "text-slate-100" },
-    { label: "强烈关注",   value: strong,    unit: "只", color: "text-emerald-400" },
-    { label: "值得观察",   value: watch,     unit: "只", color: "text-amber-400" },
-    { label: "连板股",     value: multiBoard, unit: "只", color: "text-red-400" },
-    { label: "平均封单比", value: avgSeal,   unit: "%",  color: "text-slate-100" },
+    { label: "涨停总数",   value: total,     unit: "只", color: "text-gray-900" },
+    { label: "强烈关注",   value: strong,    unit: "只", color: "text-emerald-600" },
+    { label: "值得观察",   value: watch,     unit: "只", color: "text-amber-600" },
+    { label: "连板股",     value: multiBoard, unit: "只", color: "text-red-500" },
+    { label: "平均封单比", value: avgSeal,   unit: "%",  color: "text-gray-900" },
   ];
 
   return (
-    <div className="grid grid-cols-3 sm:grid-cols-5 gap-3 mb-6">
+    <div className="flex items-stretch gap-3 mb-6 overflow-x-auto">
       {stats.map(({ label, value, unit, color }) => (
         <div
           key={label}
-          className="bg-slate-800/40 border border-slate-700/50 rounded-xl p-3 text-center"
+          className="flex-1 min-w-0 bg-[#f8f9fa] border border-gray-200 rounded-xl px-3 py-3 text-center"
         >
-          <div className={`text-2xl font-bold ${color}`}>
+          <div className={`text-xl font-bold font-mono ${color}`}>
             {value}
-            <span className="text-sm font-normal ml-0.5">{unit}</span>
+            <span className="text-xs font-normal ml-0.5">{unit}</span>
           </div>
-          <div className="text-slate-500 text-xs mt-0.5">{label}</div>
+          <div className="text-gray-400 text-[11px] mt-0.5 whitespace-nowrap">{label}</div>
         </div>
       ))}
     </div>
@@ -450,7 +416,7 @@ function StatsHeader({ stocks }) {
 }
 
 // ─────────────────────────────────────────────
-// 筛选排序栏
+// 筛选排序栏（浅灰胶囊样式）
 // ─────────────────────────────────────────────
 
 function FilterBar({ sortBy, setSortBy, filterLabel, setFilterLabel, total, filtered }) {
@@ -462,26 +428,26 @@ function FilterBar({ sortBy, setSortBy, filterLabel, setFilterLabel, total, filt
   ];
 
   const labelOptions = [
-    { value: "all",    label: "全部",     activeClass: "bg-slate-600 text-slate-100" },
-    { value: "强烈关注", label: "强烈关注", activeClass: "bg-emerald-400/20 text-emerald-400" },
-    { value: "值得观察", label: "值得观察", activeClass: "bg-amber-400/20 text-amber-400" },
-    { value: "一般",    label: "一般",     activeClass: "bg-slate-600 text-slate-100" },
-    { value: "谨慎",    label: "谨慎",     activeClass: "bg-red-400/20 text-red-400" },
+    { value: "all",      label: "全部" },
+    { value: "强烈关注", label: "强烈关注" },
+    { value: "值得观察", label: "值得观察" },
+    { value: "一般",     label: "一般" },
+    { value: "谨慎",     label: "谨慎" },
   ];
 
   return (
     <div className="flex flex-wrap items-center gap-3 mb-4">
       {/* 排序 */}
-      <div className="flex items-center gap-1 bg-slate-800/60 rounded-lg p-1">
-        <span className="text-slate-500 text-xs px-2">排序</span>
+      <div className="flex items-center gap-1 bg-gray-100 rounded-full px-1 py-0.5">
+        <span className="text-gray-400 text-[11px] px-2">排序</span>
         {sortOptions.map((opt) => (
           <button
             key={opt.value}
             onClick={() => setSortBy(opt.value)}
-            className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+            className={`px-3 py-1 rounded-full text-[11px] font-medium transition-colors ${
               sortBy === opt.value
-                ? "bg-slate-600 text-slate-100"
-                : "text-slate-400 hover:text-slate-200"
+                ? "bg-white text-gray-900 shadow-sm"
+                : "text-gray-500 hover:text-gray-700"
             }`}
           >
             {opt.label}
@@ -490,16 +456,16 @@ function FilterBar({ sortBy, setSortBy, filterLabel, setFilterLabel, total, filt
       </div>
 
       {/* 筛选 */}
-      <div className="flex items-center gap-1 bg-slate-800/60 rounded-lg p-1 flex-wrap">
-        <span className="text-slate-500 text-xs px-2">筛选</span>
+      <div className="flex items-center gap-1 bg-gray-100 rounded-full px-1 py-0.5 flex-wrap">
+        <span className="text-gray-400 text-[11px] px-2">筛选</span>
         {labelOptions.map((opt) => (
           <button
             key={opt.value}
             onClick={() => setFilterLabel(opt.value)}
-            className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+            className={`px-3 py-1 rounded-full text-[11px] font-medium transition-colors ${
               filterLabel === opt.value
-                ? opt.activeClass
-                : "text-slate-400 hover:text-slate-200"
+                ? "bg-white text-gray-900 shadow-sm"
+                : "text-gray-500 hover:text-gray-700"
             }`}
           >
             {opt.label}
@@ -507,9 +473,8 @@ function FilterBar({ sortBy, setSortBy, filterLabel, setFilterLabel, total, filt
         ))}
       </div>
 
-      {/* 计数提示 */}
       {filterLabel !== "all" && (
-        <span className="text-slate-500 text-xs">
+        <span className="text-gray-400 text-xs">
           显示 {filtered}/{total} 只
         </span>
       )}
@@ -518,14 +483,13 @@ function FilterBar({ sortBy, setSortBy, filterLabel, setFilterLabel, total, filt
 }
 
 // ─────────────────────────────────────────────
-// 主组件（由 page.js 调用）
+// 主组件
 // ─────────────────────────────────────────────
 
 export default function StockList({ stocks, backtestMap }) {
   const [sortBy, setSortBy]           = useState("score");
   const [filterLabel, setFilterLabel] = useState("all");
 
-  // 计算每个行业有几只股票涨停（用于板块效应显示）
   const sectorCounts = useMemo(() => {
     const counts = {};
     stocks.forEach((s) => {
@@ -534,7 +498,6 @@ export default function StockList({ stocks, backtestMap }) {
     return counts;
   }, [stocks]);
 
-  // 筛选 + 排序
   const displayList = useMemo(() => {
     let list = filterLabel === "all"
       ? [...stocks]
@@ -567,7 +530,7 @@ export default function StockList({ stocks, backtestMap }) {
       />
 
       {displayList.length === 0 ? (
-        <div className="text-center py-16 text-slate-500">
+        <div className="text-center py-16 text-gray-400">
           <TrendingUp className="w-12 h-12 mx-auto mb-3 opacity-20" />
           <p>暂无符合条件的股票</p>
         </div>

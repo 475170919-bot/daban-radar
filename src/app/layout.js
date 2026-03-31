@@ -11,7 +11,7 @@ export default function RootLayout({ children }) {
       lang="zh-CN"
       className="h-full antialiased"
     >
-      <body className="min-h-full bg-slate-950">{children}</body>
+      <body className="min-h-full bg-white">{children}</body>
     </html>
   );
 }
