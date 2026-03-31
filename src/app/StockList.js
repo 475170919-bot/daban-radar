@@ -362,11 +362,11 @@ function StockCard({ stock, sectorCount, backtestStats }) {
           {/* 明日剧本 */}
           <div className="mt-3 bg-slate-950/20 border border-slate-700/40 rounded-lg p-3">
             <div className="flex items-center justify-between gap-2 mb-1">
-              <span className="text-slate-300 text-xs font-medium">次日盘前推演与执行锚点</span>
-              <span className="text-slate-500 text-[10px]">基于当日维度自动生成</span>
+              <span className="text-slate-300 text-xs font-medium">明日剧本</span>
+              <span className="text-slate-500 text-[10px]">规则引擎自动生成</span>
             </div>
             <p className="text-slate-100 text-sm leading-relaxed">
-              {generateTomorrowScript(stock)}
+              {stock.prediction || generateTomorrowScript(stock)}
             </p>
           </div>
 

@@ -135,6 +135,124 @@ def generate_warnings(stock: dict) -> list[str]:
     return warnings
 
 
+def generate_prediction(stock: dict) -> str:
+    """
+    明日剧本推演——纯规则引擎，根据各维度得分组合生成预判文案。
+    规则按优先级从高到低匹配，命中即返回。
+    """
+    seal_amount = stock.get("seal_amount", 0) or 0
+    circ_mv = stock.get("circ_mv", 1) or 1
+    seal_ratio = seal_amount / circ_mv * 100
+    minutes = time_to_minutes(stock.get("first_seal_time", ""))
+    bc = stock.get("board_count", 1) or 1
+    oc = stock.get("open_count", 0) or 0
+
+    super_early = minutes <= 5    # 秒板/极早封
+    early = minutes <= 15         # 早盘15分钟内
+    mid = minutes <= 60           # 上午
+    seal_strong = seal_ratio >= 10
+    seal_ok = seal_ratio >= 5
+    seal_weak = seal_ratio < 3
+    seal_very_weak = seal_ratio < 2
+
+    # ── 高危组合（优先匹配） ──
+
+    # 首封极早 + 封单极弱 + 2连板 → 情绪板无资金沉淀
+    if super_early and seal_weak and bc == 2:
+        return (
+            "该股首封极早但买盘承接严重不足，属于典型的情绪板。"
+            "明日预期：谨防高开诱多或低开闷杀。"
+            "操作建议：持筹者若早盘高开不及预期（低于3%）或冲高无力，建议果断止盈；"
+            "空仓者不建议排板接力3板，炸板风险极高。"
+        )
+
+    # 高位板（≥4）+ 封单弱 → 高位弱封
+    if bc >= 4 and not seal_ok:
+        return (
+            f"该股已{bc}连板处于高位，但封单比仅{seal_ratio:.1f}%，资金承接力度不足。"
+            "明日预期：高位股一旦开板，跌幅往往剧烈。"
+            "操作建议：严格设定止损位，若开盘封单快速流失或低于昨日50%，立即离场。"
+        )
+
+    # 反复炸板（≥2次）→ 筹码博弈激烈
+    if oc >= 2:
+        return (
+            f"该股炸板{oc}次，说明筹码博弈非常激烈，多空分歧大。"
+            "明日预期：冲高回落概率较高。"
+            "操作建议：不做无脑接力，尤其对高位板更要等强承接信号再动；"
+            "若盘中再次开板且封不回，果断放弃。"
+        )
+
+    # 封单极弱 + 多板 → 先天短板
+    if seal_very_weak and bc >= 2:
+        return (
+            "封单比极低属于"先天短板"，主力封板意愿不强。"
+            "明日预期：更容易在开盘后出现回落或反复换手。"
+            "操作建议：只看回封质量，不追高；若盘中开板或封单快速流失，优先兑现。"
+        )
+
+    # 午后弱封 + 多板 → 尾盘拉升可疑
+    if not mid and bc >= 2:
+        return (
+            "首封时间偏晚（午后封板），市场拉升的主线支撑可能不足。"
+            "明日预期：高开时更像情绪宣泄而非真正加速。"
+            "操作建议：宁可等分歧确认（观察第一个小时走势），也尽量避免开盘追涨。"
+        )
+
+    # ── 中性组合 ──
+
+    # 首封早 + 封单一般 + 首板
+    if early and not seal_strong and bc == 1:
+        return (
+            "首板股首封时间较早，但封单比一般，属于中等质量涨停。"
+            "明日预期：若板块持续发酵可能有溢价，否则大概率震荡。"
+            "操作建议：关注次日竞价情况，若高开3%-5%可观望是否能二封；"
+            "若低开则回避。"
+        )
+
+    # 首封早 + 封单强 + 2连板 → 晋级3板潜力
+    if early and seal_strong and bc == 2:
+        return (
+            "封板质量较高：首封时间早且封单充足，2连板有一定人气基础。"
+            "明日预期：存在晋级3板的可能性，关注能否放量突破。"
+            "操作建议：若竞价高开5%以上且量能配合，可考虑参与；"
+            "若高开后快速回落破均线，及时止损。"
+        )
+
+    # 首封早 + 封单强 + 3连板 → 情绪核心
+    if early and seal_strong and bc == 3:
+        return (
+            f"3连板且封单比{seal_ratio:.1f}%表现强势，有望成为短线情绪核心。"
+            "明日预期：市场关注度高，但4板位置也是分歧加大的关口。"
+            "操作建议：可跟踪但仓位宜轻，注意观察竞价量能和板块跟随度；"
+            "若开盘即炸板则快速止损。"
+        )
+
+    # 首封早 + 封单强 + 首板 → 优质首板
+    if early and seal_strong and bc == 1:
+        return (
+            f"优质首板信号：首封时间早（开盘{minutes}分钟内），封单比{seal_ratio:.1f}%较高。"
+            "明日预期：有较高的次日溢价概率。"
+            "操作建议：关注次日竞价强度，若高开且封单维持可考虑持有；"
+            "重点观察板块是否有联动效应。"
+        )
+
+    # 午后首板 + 封单强
+    if not mid and seal_strong and bc == 1:
+        return (
+            "虽然首封时间偏晚（午后封板），但封单比较高显示资金承接力度足。"
+            "明日预期：有一定溢价空间但不宜期望过高。"
+            "操作建议：适合轻仓参与，重点看次日开盘量价是否配合。"
+        )
+
+    # ── 默认模板 ──
+    return (
+        "整体属于可跟踪的涨停股，用"封单变化 + 开板次数"做风控锚点。"
+        "明日预期：偏向高波动，但只要封单能维持且不反复开板，就存在延续机会；"
+        "反之及时止损。"
+    )
+
+
 # ──────────────────────────────────────────────
 # 评分算法（来自 SKILL.md）
 # ──────────────────────────────────────────────
@@ -303,6 +421,7 @@ def build_row(stock: dict, screen_date: str) -> dict:
     score = calculate_score(stock)
     label = get_score_label(score)
     warnings = generate_warnings(stock)
+    prediction = generate_prediction(stock)
 
     # 把首封时间统一转成 HH:MM:SS 格式存储
     raw_time = str(stock.get("first_seal_time", "") or "")
@@ -328,6 +447,7 @@ def build_row(stock: dict, screen_date: str) -> dict:
         "score": score,
         "score_label": label,
         "warnings": warnings,
+        "prediction": prediction,
     }
 
 
