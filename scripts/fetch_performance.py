@@ -85,52 +85,47 @@ def fetch_screened_stocks(screen_date: str) -> list[dict]:
 
 def get_next_day_prices(codes: list[str], track_date: str) -> dict:
     """
-    用 AKShare 获取指定日期所有 A 股行情数据，返回字典 {code: {open, close, high, low}}。
-    track_date 格式：'20260330'
+    用 AKShare 一次性获取全市场实时行情，筛选出目标股票的开高低收。
+    比逐只调用 stock_zh_a_hist 快得多，且不会被限流。
+    track_date 参数仅用于日志，实际取最新交易日数据。
     """
-    log.info(f"正在获取 {track_date} 的行情数据...")
+    log.info(f"正在获取全市场行情数据（一次性）...")
+
+    try:
+        df = ak.stock_zh_a_spot_em()
+    except Exception as e:
+        log.error(f"获取全市场行情失败：{e}")
+        return {}
+
+    if df is None or df.empty:
+        log.warning("全市场行情数据为空。")
+        return {}
+
+    log.info(f"全市场共 {len(df)} 只股票，正在筛选目标...")
+
+    # 确保代码列为字符串
+    df["代码"] = df["代码"].astype(str)
+    target = df[df["代码"].isin(codes)]
 
     prices = {}
-    failed = []
-    max_retries = 3
+    for _, row in target.iterrows():
+        code = row["代码"]
+        try:
+            prices[code] = {
+                "open": float(row.get("今开", 0) or 0),
+                "close": float(row.get("最新价", 0) or 0),
+                "high": float(row.get("最高", 0) or 0),
+                "low": float(row.get("最低", 0) or 0),
+            }
+        except (ValueError, TypeError):
+            continue
 
-    for i, code in enumerate(codes):
-        success = False
-        for attempt in range(max_retries):
-            try:
-                df = ak.stock_zh_a_hist(
-                    symbol=code,
-                    period="daily",
-                    start_date=track_date,
-                    end_date=track_date,
-                    adjust="qfq",
-                )
-                if df is not None and not df.empty:
-                    row = df.iloc[0]
-                    prices[code] = {
-                        "open": float(row["开盘"]),
-                        "close": float(row["收盘"]),
-                        "high": float(row["最高"]),
-                        "low": float(row["最低"]),
-                    }
-                success = True
-                break
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    wait = (attempt + 1) * 2
-                    log.warning(f"获取 {code} 失败（第{attempt+1}次），{wait}秒后重试...")
-                    time.sleep(wait)
-                else:
-                    log.warning(f"获取 {code} 行情失败（已重试{max_retries}次）：{e}")
-                    failed.append(code)
+    # 过滤掉开盘价为0的（可能停牌）
+    prices = {k: v for k, v in prices.items() if v["open"] > 0 and v["close"] > 0}
 
-        # 每个请求间隔 0.5 秒，避免被限流
-        if i < len(codes) - 1:
-            time.sleep(0.5)
-
-    log.info(f"成功获取 {len(prices)} 只股票行情，失败 {len(failed)} 只。")
-    if failed:
-        log.warning(f"失败的股票：{', '.join(failed[:10])}")
+    matched = len(prices)
+    missed = len(codes) - matched
+    log.info(f"成功匹配 {matched} 只，未匹配 {missed} 只（可能停牌或未上市）。")
     return prices
 
 

@@ -343,7 +343,7 @@ def upsert_to_supabase(rows: list[dict]) -> None:
         log.error("缺少 SUPABASE_URL 或 SUPABASE_KEY 环境变量，请检查 .env.local 文件。")
         sys.exit(1)
 
-    endpoint = f"{supabase_url}/rest/v1/daily_screens"
+    endpoint = f"{supabase_url}/rest/v1/daily_screens?on_conflict=screen_date,code"
     headers = {
         "apikey": supabase_key,
         "Authorization": f"Bearer {supabase_key}",
