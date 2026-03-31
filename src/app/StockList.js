@@ -197,10 +197,14 @@ function StockCard({ stock, sectorCount, conceptFirstSealRank, conceptFirstSealT
   const [expanded, setExpanded] = useState(false);
   const { text: scoreText, bg: scoreBg } = getScoreStyle(stock.score);
   const subScores = useMemo(() => getSubScores(stock, sectorCount), [stock, sectorCount]);
-  const { bottleneckLabel, fatalMessages } = useMemo(
+  const { bottleneckLabel, fatalMessages: clientFatalMessages } = useMemo(
     () => getWoodBucketAndFatalTags(stock, subScores),
     [stock, subScores]
   );
+
+  // 优先使用数据库存储的 warnings（后端计算），没有则回退到客户端计算
+  const dbWarnings = stock.warnings || [];
+  const warnings = dbWarnings.length > 0 ? dbWarnings : clientFatalMessages;
 
   // 封单比颜色
   const sealColor =
@@ -276,21 +280,19 @@ function StockCard({ stock, sectorCount, conceptFirstSealRank, conceptFirstSealT
           >
             {stock.score_label}
           </span>
-          {/* 红黑标签（放在评分旁边：只在 sm+ 显示，避免主行拥挤） */}
-          <div className="hidden sm:flex items-center gap-2">
-            <span className="px-2 py-1 rounded border border-slate-700/60 bg-slate-950/40 text-slate-200 text-[11px] font-medium max-w-[8.5rem] truncate">
-              {bottleneckLabel}
-            </span>
-            {fatalMessages.slice(0, 1).map((msg) => (
-              <span
-                key={msg}
-                className="px-2 py-1 rounded bg-red-500/20 text-red-200 text-[11px] font-medium max-w-[7.5rem] truncate"
-                title={msg}
-              >
-                {msg.replace("⚠️ ", "")}
-              </span>
-            ))}
-          </div>
+          {/* 致命缺陷预警标签（红底白字，评分旁边） */}
+          {warnings.length > 0 && (
+            <div className="hidden sm:flex items-center gap-1.5">
+              {warnings.slice(0, 2).map((w) => (
+                <span
+                  key={w}
+                  className="px-2 py-0.5 rounded bg-red-600 text-white text-[11px] font-semibold"
+                >
+                  ⚠ {typeof w === "string" ? w.replace(/^⚠️?\s*/, "") : w}
+                </span>
+              ))}
+            </div>
+          )}
           {expanded
             ? <ChevronUp className="w-4 h-4 text-slate-500" />
             : <ChevronDown className="w-4 h-4 text-slate-500" />
@@ -331,17 +333,20 @@ function StockCard({ stock, sectorCount, conceptFirstSealRank, conceptFirstSealT
               <span className={`font-bold text-lg ${scoreText}`}>{stock.score}分 · {stock.score_label}</span>
             </div>
 
-            {/* 红黑标签：木桶效应 + 致命缺陷（放到评分旁边） */}
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="px-2 py-1 rounded border border-slate-700/60 bg-slate-950/40 text-slate-200 text-xs font-medium">
-                {bottleneckLabel}
-              </span>
-              {fatalMessages.map((msg) => (
-                <span key={msg} className="px-2 py-1 rounded bg-red-500/20 text-red-200 text-xs font-medium">
-                  {msg}
-                </span>
-              ))}
-            </div>
+            {/* 致命缺陷预警标签（红底白字） */}
+            {warnings.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2">
+                {warnings.map((w) => (
+                  <span key={w} className="px-2 py-1 rounded bg-red-600 text-white text-xs font-semibold">
+                    ⚠ {typeof w === "string" ? w.replace(/^⚠️?\s*/, "") : w}
+                  </span>
+                ))}
+              </div>
+            )}
+            {/* 木桶效应 */}
+            <span className="px-2 py-1 rounded border border-slate-700/60 bg-slate-950/40 text-slate-200 text-xs font-medium">
+              {bottleneckLabel}
+            </span>
           </div>
 
           {/* 明日剧本 */}

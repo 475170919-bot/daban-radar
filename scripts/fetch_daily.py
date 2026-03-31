@@ -69,6 +69,72 @@ def get_score_label(score: float) -> str:
         return "谨慎"
 
 
+def generate_warnings(stock: dict) -> list[str]:
+    """
+    致命缺陷预警标签。根据评分子项和组合条件生成警告列表。
+
+    规则：
+    1. 封单比得分 ≤ 12（满分30的40%）→ "封盘极弱"
+    2. 首封时间在午后（得分 ≤ 10）→ "午后弱封"
+    3. 炸板次数 ≥ 2 → "反复炸板"
+    4. 连板 ≥ 4 且封单比 < 5% → "高位弱封风险"
+    """
+    warnings = []
+
+    # —— 计算各子项得分（与 calculate_score 一致） ——
+
+    # 封单比得分
+    seal_amount = stock.get("seal_amount", 0) or 0
+    circ_mv = stock.get("circ_mv", 1) or 1
+    seal_ratio = seal_amount / circ_mv * 100
+    if seal_ratio >= 15:
+        seal_score = 30
+    elif seal_ratio >= 10:
+        seal_score = 25
+    elif seal_ratio >= 5:
+        seal_score = 18
+    elif seal_ratio >= 2:
+        seal_score = 10
+    else:
+        seal_score = 3
+
+    # 首封时间得分
+    minutes = time_to_minutes(stock.get("first_seal_time", ""))
+    if minutes <= 2:
+        time_score = 25
+    elif minutes <= 15:
+        time_score = 22
+    elif minutes <= 60:
+        time_score = 16
+    elif minutes <= 120:
+        time_score = 10
+    else:
+        time_score = 5
+
+    bc = stock.get("board_count", 1) or 1
+    oc = stock.get("open_count", 0) or 0
+
+    # —— 应用规则 ——
+
+    # 1. 封单比得分 ≤ 12（满分30的40%）
+    if seal_score <= 12:
+        warnings.append("封盘极弱")
+
+    # 2. 首封时间在午后（得分 ≤ 10）
+    if time_score <= 10:
+        warnings.append("午后弱封")
+
+    # 3. 炸板 ≥ 2 次
+    if oc >= 2:
+        warnings.append("反复炸板")
+
+    # 4. 连板 ≥ 4 且封单比 < 5%
+    if bc >= 4 and seal_ratio < 5:
+        warnings.append("高位弱封风险")
+
+    return warnings
+
+
 # ──────────────────────────────────────────────
 # 评分算法（来自 SKILL.md）
 # ──────────────────────────────────────────────
@@ -236,6 +302,7 @@ def build_row(stock: dict, screen_date: str) -> dict:
 
     score = calculate_score(stock)
     label = get_score_label(score)
+    warnings = generate_warnings(stock)
 
     # 把首封时间统一转成 HH:MM:SS 格式存储
     raw_time = str(stock.get("first_seal_time", "") or "")
@@ -260,6 +327,7 @@ def build_row(stock: dict, screen_date: str) -> dict:
         "concept": str(stock.get("industry", "") or ""),
         "score": score,
         "score_label": label,
+        "warnings": warnings,
     }
 
 
@@ -348,6 +416,8 @@ def main():
     log.info(f"  值得观察（70-84）：{sum(1 for r in rows if 70 <= r['score'] < 85)} 只")
     log.info(f"  一般    （50-69）：{sum(1 for r in rows if 50 <= r['score'] < 70)} 只")
     log.info(f"  谨慎    （<50）  ：{sum(1 for r in rows if r['score'] < 50)} 只")
+    warned = sum(1 for r in rows if r.get("warnings"))
+    log.info(f"  致命缺陷预警：{warned} 只")
 
     # 打印前5名
     log.info("--- 今日 TOP 5 ---")
