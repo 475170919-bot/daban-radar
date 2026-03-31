@@ -320,16 +320,13 @@ function StockCard({ stock, sectorCount, backtestMap }) {
                   {w}
                 </span>
               ))}
-              <span className="px-2 py-0.5 rounded border border-gray-200 text-gray-500 text-[11px]">
-                {bottleneckLabel}
-              </span>
             </div>
           </div>
 
           {/* 明日剧本 */}
           <div className="mt-3 bg-white border border-gray-200 rounded-lg p-3">
             <div className="flex items-center justify-between gap-2 mb-1">
-              <span className="text-gray-600 text-xs font-medium">明日剧本</span>
+              <span className="text-gray-600 text-xs font-medium">操作建议</span>
               <span className="text-gray-300 text-[10px]">规则引擎自动生成</span>
             </div>
             <p className="text-gray-700 text-xs leading-relaxed">
