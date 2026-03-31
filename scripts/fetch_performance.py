@@ -22,6 +22,8 @@ import json
 import logging
 from datetime import date, datetime, timedelta
 
+import time
+
 import httpx
 import akshare as ak
 import pandas as pd
@@ -88,32 +90,43 @@ def get_next_day_prices(codes: list[str], track_date: str) -> dict:
     """
     log.info(f"正在获取 {track_date} 的行情数据...")
 
-    # 用个股历史数据逐只获取（更可靠）
     prices = {}
     failed = []
+    max_retries = 3
 
-    for code in codes:
-        try:
-            df = ak.stock_zh_a_hist(
-                symbol=code,
-                period="daily",
-                start_date=track_date,
-                end_date=track_date,
-                adjust="qfq",  # 前复权
-            )
-            if df is not None and not df.empty:
-                row = df.iloc[0]
-                prices[code] = {
-                    "open": float(row["开盘"]),
-                    "close": float(row["收盘"]),
-                    "high": float(row["最高"]),
-                    "low": float(row["最低"]),
-                }
-            else:
-                failed.append(code)
-        except Exception as e:
-            log.warning(f"获取 {code} 行情失败：{e}")
-            failed.append(code)
+    for i, code in enumerate(codes):
+        success = False
+        for attempt in range(max_retries):
+            try:
+                df = ak.stock_zh_a_hist(
+                    symbol=code,
+                    period="daily",
+                    start_date=track_date,
+                    end_date=track_date,
+                    adjust="qfq",
+                )
+                if df is not None and not df.empty:
+                    row = df.iloc[0]
+                    prices[code] = {
+                        "open": float(row["开盘"]),
+                        "close": float(row["收盘"]),
+                        "high": float(row["最高"]),
+                        "low": float(row["最低"]),
+                    }
+                success = True
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait = (attempt + 1) * 2
+                    log.warning(f"获取 {code} 失败（第{attempt+1}次），{wait}秒后重试...")
+                    time.sleep(wait)
+                else:
+                    log.warning(f"获取 {code} 行情失败（已重试{max_retries}次）：{e}")
+                    failed.append(code)
+
+        # 每个请求间隔 0.5 秒，避免被限流
+        if i < len(codes) - 1:
+            time.sleep(0.5)
 
     log.info(f"成功获取 {len(prices)} 只股票行情，失败 {len(failed)} 只。")
     if failed:
