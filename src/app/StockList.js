@@ -2,6 +2,7 @@
 
 import { useState, useMemo } from "react";
 import { ChevronDown, ChevronUp, TrendingUp } from "lucide-react";
+import { patternKey } from "./utils/patternUtils";
 
 // ─────────────────────────────────────────────
 // 工具函数
@@ -193,7 +194,7 @@ function ScoreRing({ score }) {
 // 单只股票卡片
 // ─────────────────────────────────────────────
 
-function StockCard({ stock, sectorCount, backtestStats }) {
+function StockCard({ stock, sectorCount, backtestMap }) {
   const [expanded, setExpanded] = useState(false);
   const { text: scoreText, bg: scoreBg } = getScoreStyle(stock.score);
   const subScores = useMemo(() => getSubScores(stock, sectorCount), [stock, sectorCount]);
@@ -370,38 +371,37 @@ function StockCard({ stock, sectorCount, backtestStats }) {
             </p>
           </div>
 
-          {/* 历史相似形态回测（灰色小字） */}
+          {/* 历史相似形态回测（按 patternKey 个性化匹配） */}
           {(() => {
-            const timeMin = timeToMinutes(stock.first_seal_time);
-            const isSimilarPattern =
-              (stock.board_count || 1) === 2 &&
-              timeMin <= 15 && // 9:45 前
-              (stock.seal_ratio || 0) < 3; // 封单比低于3%
-
-            if (!isSimilarPattern) return null;
-            if (!backtestStats) {
+            if (!backtestMap) return null;
+            const pk = patternKey(stock.board_count || 1, stock.first_seal_time || "", stock.seal_ratio || 0);
+            const stats = backtestMap[pk];
+            if (!stats || stats.sampleCount === 0) {
               return (
                 <p className="mt-2 text-slate-500 text-xs">
-                  历史回测：暂无可用样本，先以风险提示为先。
+                  历史回测：该形态近3个月样本不足，暂无统计数据。
                 </p>
               );
             }
 
-            const count = backtestStats.count ?? 0;
-            if (count === 0) {
-              return (
-                <p className="mt-2 text-slate-500 text-xs">
-                  历史回测：样本不足（近一年匹配条件为0次）。
-                </p>
-              );
-            }
+            const winColor = stats.winRate >= 60 ? "text-emerald-400" : stats.winRate >= 40 ? "text-amber-400" : "text-red-400";
+            const avgColor = stats.avgCloseReturn >= 0 ? "text-emerald-400" : "text-red-400";
 
             return (
-              <p className="mt-2 text-slate-500 text-xs leading-relaxed">
-                历史回测：过去一年出现相似数据模型共 {count} 次，次日晋级3连板成功率仅为{" "}
-                {backtestStats.next3Rate.toFixed(1)}%，次日收阴（或炸板）概率高达{" "}
-                {backtestStats.badDayRate.toFixed(1)}%。
-              </p>
+              <div className="mt-2 bg-slate-950/20 border border-slate-700/40 rounded-lg p-3">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-slate-400 text-xs font-medium">📊 历史相似形态回测</span>
+                  <span className="text-slate-600 text-[10px]">近3个月</span>
+                </div>
+                <p className="text-slate-300 text-xs leading-relaxed">
+                  相似形态共出现 <span className="text-slate-100 font-medium">{stats.sampleCount}</span> 次，
+                  次日盈利率 <span className={`font-medium ${winColor}`}>{stats.winRate.toFixed(1)}%</span>，
+                  平均收盘涨幅 <span className={`font-medium ${avgColor}`}>{stats.avgCloseReturn >= 0 ? "+" : ""}{stats.avgCloseReturn.toFixed(2)}%</span>
+                  {stats.avgOpenReturn !== undefined && (
+                    <>，平均开盘涨幅 <span className={`font-medium ${stats.avgOpenReturn >= 0 ? "text-emerald-400" : "text-red-400"}`}>{stats.avgOpenReturn >= 0 ? "+" : ""}{stats.avgOpenReturn.toFixed(2)}%</span></>
+                  )}
+                </p>
+              </div>
             );
           })()}
         </div>
@@ -521,7 +521,7 @@ function FilterBar({ sortBy, setSortBy, filterLabel, setFilterLabel, total, filt
 // 主组件（由 page.js 调用）
 // ─────────────────────────────────────────────
 
-export default function StockList({ stocks, backtestStats }) {
+export default function StockList({ stocks, backtestMap }) {
   const [sortBy, setSortBy]           = useState("score");
   const [filterLabel, setFilterLabel] = useState("all");
 
@@ -578,7 +578,7 @@ export default function StockList({ stocks, backtestStats }) {
               key={stock.code}
               stock={stock}
               sectorCount={(sectorCounts[stock.concept] || 1) - 1}
-              backtestStats={backtestStats}
+              backtestMap={backtestMap}
             />
           ))}
         </div>

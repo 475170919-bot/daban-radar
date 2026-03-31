@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import StockList from "./StockList";
+import { patternKey } from "./utils/patternUtils";
 
 // 每5分钟重新验证一次缓存（数据每天只更新一次，5分钟足够）
 export const revalidate = 300;
@@ -100,10 +101,11 @@ async function getPerformanceStats() {
 }
 
 // ─────────────────────────────────────────────
-// 历史相似形态回测（固定模型：2连板 + 9:45前首封 + 封单比<3%）
-// 用过去一年 daily_screens + daily_performance + 次日 daily_screens 组合计算概率
+// 历史相似形态回测（按 patternKey 分档聚合）
+// 拉取过去3个月的 daily_screens + daily_performance，按 patternKey 分组统计
+// 返回 Map<patternKey, { sampleCount, winRate, avgCloseReturn, avgOpenReturn }>
 // ─────────────────────────────────────────────
-async function getSimilarPatternBacktestStats() {
+async function getPerStockBacktestStats() {
   const supabase = getSupabase();
   if (!supabase) return null;
 
@@ -119,86 +121,90 @@ async function getSimilarPatternBacktestStats() {
 
   const endDate = new Date(latestRow.screen_date + "T00:00:00");
   const startDate = new Date(endDate);
-  startDate.setFullYear(startDate.getFullYear() - 1);
+  startDate.setMonth(startDate.getMonth() - 3);
 
   const startStr = startDate.toISOString().slice(0, 10);
   const endStr = endDate.toISOString().slice(0, 10);
 
-  // 1) 找出过去一年满足“相似数据模型”的选股事件
-  // first_seal_time 在库中为 HH:MM:SS 字符串，直接做字典序比较即可
-  const { data: events, error: eventsErr } = await supabase
-    .from("daily_screens")
-    .select("screen_date,code,seal_ratio,first_seal_time,board_count")
-    .gte("screen_date", startStr)
-    .lte("screen_date", endStr)
-    .eq("board_count", 2)
-    .lt("seal_ratio", 3)
-    .lte("first_seal_time", "09:45:00");
-
-  if (eventsErr) {
-    console.error("Backtest fetch events error:", eventsErr.message);
-    return null;
+  // 1) 拉取过去3个月的所有 daily_screens（需要 board_count, first_seal_time, seal_ratio 来算 patternKey）
+  let allScreens = [];
+  let offset = 0;
+  const pageSize = 1000;
+  while (true) {
+    const { data, error } = await supabase
+      .from("daily_screens")
+      .select("screen_date,code,board_count,first_seal_time,seal_ratio")
+      .gte("screen_date", startStr)
+      .lte("screen_date", endStr)
+      .range(offset, offset + pageSize - 1);
+    if (error) {
+      console.error("Backtest fetch screens error:", error.message);
+      return null;
+    }
+    if (!data || data.length === 0) break;
+    allScreens = allScreens.concat(data);
+    if (data.length < pageSize) break;
+    offset += pageSize;
   }
 
-  if (!events || events.length === 0) {
-    return { count: 0, next3Rate: 0, badDayRate: 0 };
+  if (allScreens.length === 0) return {};
+
+  // 2) 拉取过去3个月的所有 daily_performance
+  let allPerfs = [];
+  offset = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from("daily_performance")
+      .select("screen_date,code,close_return,open_return,is_win")
+      .gte("screen_date", startStr)
+      .lte("screen_date", endStr)
+      .range(offset, offset + pageSize - 1);
+    if (error) {
+      console.error("Backtest fetch performance error:", error.message);
+      return null;
+    }
+    if (!data || data.length === 0) break;
+    allPerfs = allPerfs.concat(data);
+    if (data.length < pageSize) break;
+    offset += pageSize;
   }
 
-  const eventsKey = new Set(events.map((e) => `${e.screen_date}|${e.code}`));
-  const codes = Array.from(new Set(events.map((e) => e.code))).slice(0, 1000);
+  // 3) 建立 performance 查找表：screen_date|code -> perf
+  const perfByKey = new Map(allPerfs.map((p) => [`${p.screen_date}|${p.code}`, p]));
 
-  // 2) 取这些事件的次日表现 daily_performance
-  const { data: perfs, error: perfsErr } = await supabase
-    .from("daily_performance")
-    .select("screen_date,code,close_return,is_win,track_date")
-    .gte("screen_date", startStr)
-    .lte("screen_date", endStr)
-    .in("code", codes);
+  // 4) 按 patternKey 分组聚合
+  const buckets = {};
+  for (const s of allScreens) {
+    const pk = patternKey(s.board_count || 1, s.first_seal_time || "", s.seal_ratio || 0);
+    const perf = perfByKey.get(`${s.screen_date}|${s.code}`);
+    if (!perf) continue; // 没有次日表现数据，跳过
 
-  if (perfsErr) {
-    console.error("Backtest fetch performance error:", perfsErr.message);
-    return null;
+    if (!buckets[pk]) {
+      buckets[pk] = { total: 0, wins: 0, closeReturns: [], openReturns: [] };
+    }
+    const b = buckets[pk];
+    b.total++;
+    if (perf.is_win) b.wins++;
+    b.closeReturns.push(perf.close_return || 0);
+    b.openReturns.push(perf.open_return || 0);
   }
 
-  const matched = (perfs || []).filter((p) => eventsKey.has(`${p.screen_date}|${p.code}`));
-  const count = matched.length;
-  if (count === 0) return { count: 0, next3Rate: 0, badDayRate: 0 };
-
-  // 3) 拉取次日 daily_screens，用来判断“是否晋级3连板”和“是否炸板/收阴”
-  const trackDates = Array.from(new Set(matched.map((m) => m.track_date))).slice(0, 500);
-  const { data: nextScreens, error: nextErr } = await supabase
-    .from("daily_screens")
-    .select("screen_date,code,board_count,open_count")
-    .in("screen_date", trackDates)
-    .in("code", codes);
-
-  if (nextErr) {
-    console.error("Backtest fetch nextScreens error:", nextErr.message);
-    return null;
+  // 5) 转成最终 map
+  const result = {};
+  for (const [pk, b] of Object.entries(buckets)) {
+    result[pk] = {
+      sampleCount: b.total,
+      winRate: b.total > 0 ? (b.wins / b.total) * 100 : 0,
+      avgCloseReturn: b.closeReturns.length > 0
+        ? b.closeReturns.reduce((a, c) => a + c, 0) / b.closeReturns.length
+        : 0,
+      avgOpenReturn: b.openReturns.length > 0
+        ? b.openReturns.reduce((a, c) => a + c, 0) / b.openReturns.length
+        : 0,
+    };
   }
 
-  const nextByKey = new Map((nextScreens || []).map((n) => [`${n.screen_date}|${n.code}`, n]));
-
-  let next3Count = 0;
-  let badCount = 0;
-
-  for (const p of matched) {
-    const nextKey = `${p.track_date}|${p.code}`;
-    const next = nextByKey.get(nextKey);
-
-    const isNext3 = (next?.board_count || 0) >= 3;
-    if (isNext3) next3Count++;
-
-    const closeNeg = p.is_win === false || (p.close_return ?? 0) <= 0;
-    const nextOpen = (next?.open_count || 0) > 0;
-    if (closeNeg || nextOpen) badCount++;
-  }
-
-  return {
-    count,
-    next3Rate: (next3Count / count) * 100,
-    badDayRate: (badCount / count) * 100,
-  };
+  return result;
 }
 
 function formatDate(dateStr) {
@@ -293,10 +299,10 @@ function HitRateCard({ stats }) {
 }
 
 export default async function Home() {
-  const [{ stocks, screenDate }, perfStats, backtestStats] = await Promise.all([
+  const [{ stocks, screenDate }, perfStats, backtestMap] = await Promise.all([
     getScreenData(),
     getPerformanceStats(),
-    getSimilarPatternBacktestStats(),
+    getPerStockBacktestStats(),
   ]);
 
   return (
@@ -340,7 +346,7 @@ export default async function Home() {
             </p>
           </div>
         ) : (
-          <StockList stocks={stocks} backtestStats={backtestStats} />
+          <StockList stocks={stocks} backtestMap={backtestMap} />
         )}
       </main>
 
