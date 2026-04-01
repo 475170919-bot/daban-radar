@@ -3,6 +3,7 @@
 import { useState, useMemo } from "react";
 import { ChevronDown, ChevronUp, TrendingUp } from "lucide-react";
 import { patternKey } from "./utils/patternUtils";
+import Link from "next/link";
 
 // ─────────────────────────────────────────────
 // 工具函数
@@ -214,9 +215,14 @@ function StockCard({ stock, sectorCount, backtestMap }) {
         <div className="flex-1 min-w-0">
           {/* 第一行：名称 + 代码 + 标签 */}
           <div className="flex items-center gap-2 flex-nowrap overflow-hidden">
-            <span className="text-gray-900 font-semibold text-sm whitespace-nowrap">
+            <Link
+              href={`/stock/${stock.code}`}
+              onClick={(e) => e.stopPropagation()}
+              className="text-blue-600 font-semibold text-sm whitespace-nowrap underline decoration-blue-300 hover:text-blue-800 hover:decoration-blue-500 transition-colors"
+              title={`查看 ${stock.name} 详情`}
+            >
               {stock.name}
-            </span>
+            </Link>
             <span className="text-gray-400 text-xs font-mono whitespace-nowrap">{stock.code}</span>
 
             {stock.board_count > 1 && (
