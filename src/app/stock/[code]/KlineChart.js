@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import {
   ComposedChart,
   Bar,
@@ -10,8 +10,6 @@ import {
   ResponsiveContainer,
   Cell,
   CartesianGrid,
-  Customized,
-  Rectangle,
 } from "recharts";
 
 // ─────────────────────────────────────────────
@@ -50,73 +48,64 @@ function KlineTooltip({ active, payload }) {
 }
 
 // ─────────────────────────────────────────────
-// 蜡烛图自定义渲染（通过 Customized 访问 chart 内部坐标）
+// 蜡烛形状：用 Bar 的 shape prop 绘制
+// Bar 的 dataKey="range" 给出 [low, high]
+// recharts 会把 y 和 height 映射到 [low, high] 区间
+// 我们在这个区间内画实体和影线
 // ─────────────────────────────────────────────
-function CandleSticks({ formattedGraphicalItems, xAxisMap, yAxisMap }) {
-  const xAxis = xAxisMap && Object.values(xAxisMap)[0];
-  const yAxis = yAxisMap && Object.values(yAxisMap)[0];
-  if (!xAxis || !yAxis) return null;
+function CandleShape(props) {
+  const { x, y, width, height, payload } = props;
+  if (!payload) return null;
+  const { open, close, high, low, isLimitUp } = payload;
+  if (open == null || close == null || high == null || low == null) return null;
 
-  const xScale = xAxis.scale;
-  const yScale = yAxis.scale;
-  const bandwidth = xAxis.bandwidth ? xAxis.bandwidth() : 8;
+  const isUp = close >= open;
+  const color = isUp ? "#ef4444" : "#22c55e";
 
-  // 从第一个 graphical item 取数据
-  const item = formattedGraphicalItems && formattedGraphicalItems[0];
-  if (!item) return null;
-  const data = item.props?.data || [];
+  // y 对应 high, y+height 对应 low
+  const totalRange = high - low;
+  if (totalRange <= 0) {
+    // 开盘=收盘=最高=最低，画一条横线
+    const centerX = x + width / 2;
+    return (
+      <line x1={x + 1} y1={y + height / 2} x2={x + width - 1} y2={y + height / 2} stroke={color} strokeWidth={1.5} />
+    );
+  }
+
+  const pxPerUnit = height / totalRange;
+  const centerX = x + width / 2;
+  const candleW = Math.max(width * 0.65, 2);
+
+  // 影线：整个高低范围
+  const wickTop = y; // high
+  const wickBottom = y + height; // low
+
+  // 实体
+  const bodyTop = y + (high - Math.max(open, close)) * pxPerUnit;
+  const bodyBottom = y + (high - Math.min(open, close)) * pxPerUnit;
+  const bodyH = Math.max(bodyBottom - bodyTop, 1);
 
   return (
     <g>
-      {data.map((entry, i) => {
-        const { open, close, high, low, isLimitUp, date } = entry;
-        if (open == null || close == null) return null;
-
-        const isUp = close >= open;
-        const color = isUp ? "#ef4444" : "#22c55e";
-
-        const x = xScale(date);
-        if (x == null) return null;
-
-        const centerX = x + bandwidth / 2;
-        const candleWidth = Math.max(bandwidth * 0.7, 3);
-
-        const bodyTop = yScale(Math.max(open, close));
-        const bodyBottom = yScale(Math.min(open, close));
-        const bodyHeight = Math.max(bodyBottom - bodyTop, 1);
-        const wickTop = yScale(high);
-        const wickBottom = yScale(low);
-
-        return (
-          <g key={i}>
-            {/* 上下影线 */}
-            <line
-              x1={centerX} y1={wickTop}
-              x2={centerX} y2={wickBottom}
-              stroke={color} strokeWidth={1}
-            />
-            {/* 实体 */}
-            <rect
-              x={centerX - candleWidth / 2}
-              y={bodyTop}
-              width={candleWidth}
-              height={bodyHeight}
-              fill={color}
-              stroke={color}
-              strokeWidth={0.5}
-            />
-            {/* 涨停标记 */}
-            {isLimitUp && (
-              <polygon
-                points={`${centerX},${wickTop - 10} ${centerX - 4},${wickTop - 4} ${centerX + 4},${wickTop - 4}`}
-                fill="#ef4444"
-                stroke="#fff"
-                strokeWidth={0.5}
-              />
-            )}
-          </g>
-        );
-      })}
+      {/* 上下影线 */}
+      <line x1={centerX} y1={wickTop} x2={centerX} y2={wickBottom} stroke={color} strokeWidth={1} />
+      {/* 实体 */}
+      <rect
+        x={centerX - candleW / 2}
+        y={bodyTop}
+        width={candleW}
+        height={bodyH}
+        fill={color}
+        stroke={color}
+        strokeWidth={0.5}
+      />
+      {/* 涨停三角标记 */}
+      {isLimitUp && (
+        <polygon
+          points={`${centerX},${wickTop - 8} ${centerX - 3.5},${wickTop - 2} ${centerX + 3.5},${wickTop - 2}`}
+          fill="#ef4444"
+        />
+      )}
     </g>
   );
 }
@@ -156,6 +145,12 @@ export default function KlineChart({ code }) {
     );
   }
 
+  // 给每条数据加上 range 字段供 Bar 使用
+  const chartData = data.map((d) => ({
+    ...d,
+    range: [d.low, d.high],
+  }));
+
   // 价格范围
   const prices = data.flatMap((d) => [d.high, d.low]);
   const minPrice = Math.min(...prices);
@@ -170,33 +165,34 @@ export default function KlineChart({ code }) {
       {/* K线蜡烛图 */}
       <div className="mb-2">
         <ResponsiveContainer width="100%" height={300}>
-          <ComposedChart data={data} margin={{ top: 16, right: 8, bottom: 0, left: 0 }}>
+          <ComposedChart data={chartData} margin={{ top: 16, right: 8, bottom: 0, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" vertical={false} />
             <XAxis
               dataKey="date"
               tick={{ fontSize: 10, fill: "#9ca3af" }}
               tickFormatter={(v) => v.slice(5)}
               interval={Math.floor(data.length / 6)}
-              type="category"
             />
             <YAxis
               domain={[minPrice - pricePadding, maxPrice + pricePadding]}
               tick={{ fontSize: 10, fill: "#9ca3af" }}
               tickFormatter={(v) => v.toFixed(2)}
               width={55}
+              allowDataOverflow
             />
             <Tooltip content={<KlineTooltip />} />
-            {/* 不可见的 Bar 用于驱动 tooltip 和坐标轴 */}
-            <Bar dataKey="close" fill="transparent" isAnimationActive={false} />
-            {/* 自定义蜡烛绘制 */}
-            <Customized component={CandleSticks} />
+            <Bar
+              dataKey="range"
+              shape={<CandleShape />}
+              isAnimationActive={false}
+            />
           </ComposedChart>
         </ResponsiveContainer>
       </div>
 
       {/* 成交量柱状图 */}
       <ResponsiveContainer width="100%" height={80}>
-        <ComposedChart data={data} margin={{ top: 0, right: 8, bottom: 0, left: 0 }}>
+        <ComposedChart data={chartData} margin={{ top: 0, right: 8, bottom: 0, left: 0 }}>
           <XAxis
             dataKey="date"
             tick={{ fontSize: 10, fill: "#9ca3af" }}
@@ -210,7 +206,7 @@ export default function KlineChart({ code }) {
             width={55}
           />
           <Bar dataKey="volume" isAnimationActive={false}>
-            {data.map((entry, i) => (
+            {chartData.map((entry, i) => (
               <Cell
                 key={i}
                 fill={entry.close >= entry.open ? "rgba(239,68,68,0.5)" : "rgba(34,197,94,0.5)"}
